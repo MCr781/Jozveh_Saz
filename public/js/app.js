@@ -62,13 +62,29 @@ function buildWatermarkHTML() {
 async function initStudyPlayer() {
   window.TMA.initApp();
 
-  const res = await fetch('./data/sample_course.json');
-  AppState.course = await res.json();
-  AppState.aiRemainingFree = AppState.course.ai_quota_free || 3;
+  const urlParams = new URLSearchParams(window.location.search);
+  const courseSlug = urlParams.get('course') || 'sample_course';
+
+  try {
+    // تلاش اول: دریافت امن از سرور همراه با بررسی وضعیت خرید و سهمیه واقعی
+    const apiRes = await fetch(`/api/course?id=${encodeURIComponent(courseSlug)}`, {
+      headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
+    });
+    if (!apiRes.ok) throw new Error('Fallback to local');
+    const payload = await apiRes.json();
+    AppState.course = payload.course;
+    AppState.isProUnlocked = Boolean(payload.isProUnlocked);
+    AppState.aiRemainingFree = payload.remainingAiQuota;
+  } catch (_) {
+    // تلاش دوم (Fallback مخصوص تست در Go Live): خواندن از فایل لوکال
+    const res = await fetch(`./data/${courseSlug}.json`);
+    AppState.course = await res.json();
+    AppState.aiRemainingFree = AppState.course.ai_quota_free || 3;
+  }
 
   window.TMA.loadProgress(`progress_${AppState.course.id}`, (saved) => {
     AppState.leitnerStatus = saved.leitnerStatus || {};
-    AppState.isProUnlocked = Boolean(saved.isProUnlocked);
+    if (saved.isProUnlocked) AppState.isProUnlocked = true;
     renderHeader();
     renderCheatSheet();
     renderFlashcardView();

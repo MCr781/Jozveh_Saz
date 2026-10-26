@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.tmp
+*.bak
+server/state_db.json
+server/uploads/
+.DS_Store
