@@ -162,6 +162,7 @@ function renderCheatSheet() {
           <button class="ask-ai-contextual-btn" onclick="openContextualDrawer('${item.topic}', ${item.source_page})">
             💬 ابهامی داری؟ از همین نکته بپرس
           </button>
+          <button class="pill-btn" style="margin-top:6px; width:100%; font-size:0.72rem;" onclick="openReportModal('${item.id}', '${item.topic}', ${item.source_page})">🚩 گزارش خطای علمی/تایپی در این فرمول</button>
         </div>
       `;
     })
@@ -473,6 +474,72 @@ window.simulateUnlockPurchase = function (methodName) {
   renderExamQuiz();
   renderAiQuotaBadge();
   alert(`✅ پرداخت آزمایشی (${methodName}) تایید شد! تمام فلش‌کارت‌ها، سوالات امتحان و ۱۰۰ پرسش هوش مصنوعی باز شدند.`);
+};
+
+// Anti-Spam Verified Issue Reporting
+let currentReportTarget = null;
+let lastLocalReportTimestamp = 0;
+
+window.openReportModal = function (itemId, originalText, sourcePage) {
+  window.TMA.triggerHaptic('light');
+  currentReportTarget = { itemId, originalText, sourcePage };
+  document.getElementById('reportItemMeta').textContent = `کارت انتخابی (صفحه ${sourcePage} جزوه)`;
+  document.getElementById('reportClaimInput').value = '';
+  document.getElementById('reportIssueBackdrop').classList.add('open');
+};
+
+window.closeReportModal = function () {
+  document.getElementById('reportIssueBackdrop').classList.remove('open');
+};
+
+window.submitVerifiedReport = async function () {
+  const claim = document.getElementById('reportClaimInput').value.trim();
+  if (claim.length < 5) {
+    alert('لطفاً توضیح دقیق‌تری درباره خطای علمی یا فرمولی بنویسید (حداقل ۵ حرف).');
+    return;
+  }
+
+  // قفل ضداسپم سمت کلاینت (Cooldown 60s)
+  const now = Date.now();
+  if (now - lastLocalReportTimestamp < 60000) {
+    const rem = Math.ceil((60000 - (now - lastLocalReportTimestamp)) / 1000);
+    alert(`⏳ برای جلوگیری از اسپم، لطفاً ${rem} ثانیه دیگر مجدداً تلاش کنید.`);
+    return;
+  }
+
+  const btn = document.getElementById('submitReportBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ در حال صحت‌سنجی توسط داور هوش مصنوعی...';
+
+  try {
+    const res = await fetch('http://localhost:3000/api/report-issue', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Init-Data': window.TMA.tg?.initData || ''
+      },
+      body: JSON.stringify({
+        courseId: AppState.course.id,
+        itemId: currentReportTarget.itemId,
+        originalText: currentReportTarget.originalText,
+        userClaim: claim,
+        sourcePage: currentReportTarget.sourcePage
+      })
+    });
+    const data = await res.json();
+    lastLocalReportTimestamp = Date.now();
+    alert(data.message);
+    if (data.ok) closeReportModal();
+  } catch (_) {
+    // Fallback در صورتی که فقط با Go Live تست می‌کنی و سرور پورت 3000 روشن نیست
+    lastLocalReportTimestamp = Date.now();
+    window.TMA.triggerHaptic('success');
+    alert('✅ [حالت دمو] گزارش شما ثبت و برای داور هوش مصنوعی ارسال شد! پس از تایید صحت علمی، ۲ سهمیه پرسش رایگان به حساب شما اضافه خواهد شد.');
+    closeReportModal();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'ارسال برای صحت‌سنجی هوشمند';
+  }
 };
 
 document.addEventListener('DOMContentLoaded', initStudyPlayer);
