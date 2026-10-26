@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>جزوه زنده | دستیار هوشمند شب امتحان</title>
+  <link rel="stylesheet" href="./css/katex.min.css" />
+  <link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Sticky Header -->
+    <header class="top-header">
+      <div class="header-row">
+        <div>
+          <h1 class="course-title" id="courseTitle">در حال بارگذاری جزوه...</h1>
+          <p class="course-subtitle" id="courseSubtitle"></p>
+        </div>
+        <button class="pro-badge" id="headerProBtn" onclick="openPaywallModal()">
+          🔓 نسخه کامل (۵۹ ت)
+        </button>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <span class="progress-label" id="progressLabel">۰ از ۶ کارت</span>
+      </div>
+    </header>
+
+    <!-- 4-Tab Segmented Bar -->
+    <nav class="tabs-nav">
+      <button class="tab-btn active" data-tab="tabCheatSheet">
+        <span>📑</span>
+        <span>فرمول‌نامه</span>
+      </button>
+      <button class="tab-btn" data-tab="tabFlashcards">
+        <span>🗂️</span>
+        <span>فلش‌کارت</span>
+      </button>
+      <button class="tab-btn" data-tab="tabExamQuiz">
+        <span>📝</span>
+        <span>آزمون استاد</span>
+      </button>
+      <button class="tab-btn" data-tab="tabAiSolver">
+        <span>⚡</span>
+        <span>حل سوال AI</span>
+      </button>
+    </nav>
+
+    <!-- TAB 1: Summary & Formula Cheat Sheet -->
+    <section class="view-section active" id="tabCheatSheet">
+      <div id="cheatSheetContainer"></div>
+    </section>
+
+    <!-- TAB 2: 3D Leitner Flashcards -->
+    <section class="view-section" id="tabFlashcards">
+      <div class="flashcard-controls-top">
+        <div class="filter-pills">
+          <button class="pill-btn active" onclick="setCardFilter('all', this)">همه کارت‌ها</button>
+          <button class="pill-btn" onclick="setCardFilter('review', this)">فقط نیازمند مرور 🔄</button>
+        </div>
+        <span class="page-badge" id="cardCounterBadge">کارت ۱ از ۶</span>
+      </div>
+
+      <div class="flashcard-scene" id="flashcardScene">
+        <div class="flashcard-inner" id="flashcardInner"></div>
+      </div>
+
+      <div class="leitner-actions">
+        <button class="leitner-btn known" onclick="markCardStatus('known')">✅ بلدم (تثبیت شد)</button>
+        <button class="leitner-btn review" onclick="markCardStatus('review')">🔄 مرور مجدد در شب امتحان</button>
+      </div>
+
+      <button class="ask-ai-contextual-btn" id="cardContextualBtn">
+        💬 ابهامی در این کارت داری؟ از هوش مصنوعی بپرس
+      </button>
+
+      <div class="deck-nav-row">
+        <button class="nav-arrow-btn" onclick="nextFlashcard(-1)">➡️ کارت قبلی</button>
+        <button class="nav-arrow-btn" onclick="nextFlashcard(1)">کارت بعدی ⬅️</button>
+      </div>
+    </section>
+
+    <!-- TAB 3: Exam Simulator -->
+    <section class="view-section" id="tabExamQuiz">
+      <div id="examQuestionsContainer"></div>
+    </section>
+
+    <!-- TAB 4: AI Tutor & Exam Question Solver -->
+    <section class="view-section" id="tabAiSolver">
+      <div class="ai-quota-banner">
+        <span id="aiQuotaStatus">⚡ سهمیه رایگان: ۳ پرسش</span>
+        <button class="pill-btn active" onclick="openPaywallModal()">افزایش سهمیه</button>
+      </div>
+
+      <div class="chat-messages-box" id="mainAiChatBox">
+        <div class="chat-bubble ai">
+          سلام! من کل <strong>جزوه و نمونه سوالات این درس</strong> را حفظ هستم. هر سوالی از جزوه داری بپرس یا صورت سوال امتحانی را بفرست تا دقیقاً با روش و فرمول‌های استاد خودتان حل کنم!
+        </div>
+      </div>
+
+      <div class="quick-chips-row">
+        <button class="chip-prompt" onclick="sendMainTabQuestion('simplify', 'مفهوم انرژی آزاد گیبس رو خیلی ساده توضیح بده')">💡 توضیح خودمانی گیبس</button>
+        <button class="chip-prompt" onclick="sendMainTabQuestion('example', 'یک مثال عددی امتحانی از دمای تعادل حل کن')">📐 حل مثال عددی امتحانی</button>
+        <button class="chip-prompt" onclick="sendMainTabQuestion('exam_tip', 'مهم‌ترین دام تستی و امتحانی این فصل چیه؟')">⚠️ دام‌های امتحانی استاد</button>
+      </div>
+
+      <div class="chat-input-bar">
+        <button class="chat-photo-btn" title="ارسال عکس سوال امتحان" onclick="sendMainTabQuestion('example', '📷 [تصویر سوال پایانترم ارسال شد] این سوال رو حل کن')">📷</button>
+        <input type="text" class="chat-text-input" id="mainAiInput" placeholder="سوال درسی یا امتحانی خود را بنویسید..." />
+        <button class="chat-send-btn" onclick="sendMainTabQuestion('default')">ارسال</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Contextual AI Follow-up Slide-up Drawer -->
+  <div class="modal-backdrop" id="aiDrawerBackdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-header">
+        <div>
+          <strong style="font-size:0.92rem;">💬 پرسش مؤخر از همین نکته</strong>
+          <div style="font-size:0.73rem; color:#94a3b8;" id="drawerContextTitle"></div>
+        </div>
+        <button class="close-sheet-btn" onclick="closeContextualDrawer()">✕</button>
+      </div>
+
+      <div class="chat-messages-box" id="drawerChatBox" style="height:230px;"></div>
+
+      <div class="quick-chips-row">
+        <button class="chip-prompt" onclick="sendContextualPrompt('simplify', 'این نکته رو خیلی ساده‌تر و خودمانی توضیح بده')">ساده‌تر توضیح بده</button>
+        <button class="chip-prompt" onclick="sendContextualPrompt('example', 'براش یک مثال عددی امتحانی بزن')">مثال عددی بزن</button>
+        <button class="chip-prompt" onclick="sendContextualPrompt('exam_tip', 'نکته امتحانی و دام طراح تو این بخش چیه؟')">نکته امتحانی استاد چیه؟</button>
+      </div>
+
+      <div class="chat-input-bar">
+        <input type="text" class="chat-text-input" id="drawerInput" placeholder="سوال دقیق خودت از این فرمول را بپرس..." />
+        <button class="chat-send-btn" onclick="sendContextualPrompt('default')">بپرس</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Paywall Bottom Sheet Modal -->
+  <div class="modal-backdrop" id="paywallBackdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-header">
+        <strong style="font-size:0.98rem;">🚀 باز کردن قفل کامل پکیج شب امتحان</strong>
+        <button class="close-sheet-btn" onclick="closePaywallModal()">✕</button>
+      </div>
+      <p style="font-size:0.83rem; color:#cbd5e1; margin-bottom:10px;">
+        با تهیه این پکیج به تمامی ۵۰ فلش‌کارت لایتنر، بانک سوالات پایانترم با پاسخ تشریحی و <strong>۱۰۰ پرسش از هوش مصنوعی حل سوال</strong> دسترسی دائم خواهید داشت.
+      </p>
+
+      <button class="pay-option-card" onclick="simulateUnlockPurchase('درگاه بانکی شاپرک')">
+        <div>
+          <div style="font-weight:700; color:#34d399;">💳 پرداخت آنلاین و باز شدن آنی</div>
+          <div style="font-size:0.74rem; color:#94a3b8;">درگاه مستقیم بانکی (بدون فیلترشکن)</div>
+        </div>
+        <strong>۵۹,۰۰۰ تومان</strong>
+      </button>
+
+      <button class="pay-option-card" onclick="simulateUnlockPurchase('کارت به کارت تلگرامی')">
+        <div>
+          <div style="font-weight:700; color:#a5b4fc;">⚡ کارت به کارت سریع در ربات</div>
+          <div style="font-size:0.74rem; color:#94a3b8;">مخصوص کاربران با VPN روشن (تایید در ۱۰ ثانیه)</div>
+        </div>
+        <strong>۵۹,۰۰۰ تومان</strong>
+      </button>
+    </div>
+  </div>
+
+  <script src="./js/katex.min.js"></script>
+  <script src="./js/telegram.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>
