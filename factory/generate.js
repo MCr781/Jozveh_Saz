@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,20 +11,60 @@ const require = createRequire(import.meta.url);
 const katex = require('../public/js/katex.min.js');
 
 const GEMINI_API_KEYS = [
-  process.env.GEMINI_API_KEY_1 || 'YOUR_FREE_GEMINI_KEY_1',
-  process.env.GEMINI_API_KEY_2 || 'YOUR_FREE_GEMINI_KEY_2',
-  process.env.GEMINI_API_KEY_3 || 'YOUR_FREE_GEMINI_KEY_3'
-].filter((k) => !k.startsWith('YOUR_'));
+  process.env.GEMINI_API_KEY_1 || '',
+  process.env.GEMINI_API_KEY_2 || '',
+  process.env.GEMINI_API_KEY_3 || ''
+].filter((k) => k && !k.startsWith('YOUR_'));
 
 let currentKeyIndex = 0;
 
-export function getNextClient() {
+export function getNextApiKey() {
   if (GEMINI_API_KEYS.length === 0) {
-    throw new Error('لطفا حداقل یک کلید رایگان در متغیر محیطی GEMINI_API_KEY_1 قرار دهید.');
+    throw new Error('لطفا حداقل یک کلید معتبر در متغیر محیطی GEMINI_API_KEY_1 قرار دهید.');
   }
   const apiKey = GEMINI_API_KEYS[currentKeyIndex % GEMINI_API_KEYS.length];
   currentKeyIndex++;
-  return new GoogleGenAI({ apiKey });
+  return apiKey;
+}
+
+export async function callGeminiRest({ contents, generationConfig, model = 'gemini-2.5-flash' }) {
+  const maxRetries = Math.max(1, GEMINI_API_KEYS.length);
+  let lastError = null;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const apiKey = getNextApiKey();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents, generationConfig })
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+        throw new Error(msg);
+      }
+
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        throw new Error('پاسخی از مدل Gemini دریافت نشد.');
+      }
+
+      return text;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Gemini REST Attempt ${attempt + 1}] Warning: ${err.message}`);
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+
+  throw lastError || new Error('خطا در برقراری ارتباط با Gemini REST API');
 }
 
 function loadLearnedRules() {
@@ -39,7 +78,7 @@ function loadLearnedRules() {
 }
 
 // کامپایلر خودکار: بررسی صحت سینتکس تمام فرمول‌های LaTeX با موتور KaTeX
-function findBrokenLatexFormulas(courseObj) {
+export function findBrokenLatexFormulas(courseObj) {
   const errors = [];
 
   const testExpression = (expr, location) => {
@@ -79,11 +118,10 @@ function findBrokenLatexFormulas(courseObj) {
 }
 
 // ترمیم خودکار فرمول‌های معیوب با هوش مصنوعی بدون دخالت انسان
-async function autoHealBrokenFormulas(courseObj, brokenList) {
+export async function autoHealBrokenFormulas(courseObj, brokenList) {
   if (brokenList.length === 0) return courseObj;
   console.log(`🛠️ کامپایلر KaTeX تعداد ${brokenList.length} خطای سینتکسی در فرمول‌ها پیدا کرد. در حال ترمیم خودکار...`);
 
-  const ai = getNextClient();
   const prompt = `
 در ساختار JSON زیر، این فرمول‌های LaTeX در کامپایلر KaTeX خطای سینتکس داده‌اند:
 ${JSON.stringify(brokenList, null, 2)}
@@ -92,16 +130,18 @@ ${JSON.stringify(brokenList, null, 2)}
 ${JSON.stringify(courseObj)}
 `;
 
-  const res = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{ text: prompt }],
-    config: { responseMimeType: 'application/json', temperature: 0.1 }
+  const text = await callGeminiRest({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
   });
 
-  return JSON.parse(res.text);
+  return JSON.parse(text);
 }
 
 function fileToGenerativePart(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`فایل ورودی یافت نشد: ${filePath}`);
+  }
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = ext === '.pdf' ? 'application/pdf' : ext === '.png' ? 'image/png' : 'image/jpeg';
   return {
@@ -113,48 +153,48 @@ function fileToGenerativePart(filePath) {
 }
 
 const courseSchema = {
-  type: Type.OBJECT,
+  type: 'OBJECT',
   properties: {
     summary_cheat_sheet: {
-      type: Type.ARRAY,
+      type: 'ARRAY',
       items: {
-        type: Type.OBJECT,
+        type: 'OBJECT',
         properties: {
-          id: { type: Type.STRING },
-          topic: { type: Type.STRING },
-          key_points: { type: Type.ARRAY, items: { type: Type.STRING } },
-          formula_latex: { type: Type.STRING },
-          source_page: { type: Type.INTEGER }
+          id: { type: 'STRING' },
+          topic: { type: 'STRING' },
+          key_points: { type: 'ARRAY', items: { type: 'STRING' } },
+          formula_latex: { type: 'STRING' },
+          source_page: { type: 'INTEGER' }
         },
         required: ['id', 'topic', 'key_points', 'formula_latex', 'source_page']
       }
     },
     flashcards: {
-      type: Type.ARRAY,
+      type: 'ARRAY',
       items: {
-        type: Type.OBJECT,
+        type: 'OBJECT',
         properties: {
-          id: { type: Type.STRING },
-          is_locked: { type: Type.BOOLEAN },
-          front: { type: Type.STRING },
-          back: { type: Type.STRING },
-          source_page: { type: Type.INTEGER }
+          id: { type: 'STRING' },
+          is_locked: { type: 'BOOLEAN' },
+          front: { type: 'STRING' },
+          back: { type: 'STRING' },
+          source_page: { type: 'INTEGER' }
         },
         required: ['id', 'is_locked', 'front', 'back', 'source_page']
       }
     },
     exam_questions: {
-      type: Type.ARRAY,
+      type: 'ARRAY',
       items: {
-        type: Type.OBJECT,
+        type: 'OBJECT',
         properties: {
-          id: { type: Type.STRING },
-          is_locked: { type: Type.BOOLEAN },
-          question_stem: { type: Type.STRING },
-          options: { type: Type.ARRAY, items: { type: Type.STRING } },
-          correct_index: { type: Type.INTEGER },
-          explanation: { type: Type.STRING },
-          source_page: { type: Type.INTEGER }
+          id: { type: 'STRING' },
+          is_locked: { type: 'BOOLEAN' },
+          question_stem: { type: 'STRING' },
+          options: { type: 'ARRAY', items: { type: 'STRING' } },
+          correct_index: { type: 'INTEGER' },
+          explanation: { type: 'STRING' },
+          source_page: { type: 'INTEGER' }
         },
         required: ['id', 'is_locked', 'question_stem', 'options', 'correct_index', 'explanation', 'source_page']
       }
@@ -172,7 +212,6 @@ export async function generateCoursePackage({
   inputFiles = [],
   outputPath
 }) {
-  const ai = getNextClient();
   const fileParts = inputFiles.map(fileToGenerativePart);
   const learnedRules = loadLearnedRules();
 
@@ -186,17 +225,16 @@ export async function generateCoursePackage({
 ${learnedRules}
 `;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [...fileParts, { text: systemPrompt }],
-    config: {
+  const text = await callGeminiRest({
+    contents: [{ parts: [...fileParts, { text: systemPrompt }] }],
+    generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: courseSchema,
       temperature: 0.2
     }
   });
 
-  let generatedData = JSON.parse(response.text);
+  let generatedData = JSON.parse(text);
 
   // حلقه کامپایلر خودکار KaTeX قبل از انتشار
   const brokenFormulas = findBrokenLatexFormulas(generatedData);

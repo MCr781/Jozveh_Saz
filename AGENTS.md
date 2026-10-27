@@ -1,23 +1,26 @@
-# Jezveh_Saz (جزوه‌ساز) - Architecture & Coding Rules
+# Jezveh_Saz (جزوه‌ساز) - Master Architecture & Autonomous Executor Rules
 
-## 1. Tech Stack & Zero-CDN Policy
-- **Frontend:** Pure HTML5, Vanilla JavaScript (ES6+), and Native CSS (using CSS Variables and Logical Properties).
-- **Zero External CDN in HTML:** NEVER put external `<link>` or `<script>` tags (like Google Fonts or cdnjs) inside HTML files. Always load local files:
+## 1. Role of the AI Agent (Autonomous Executor)
+- You are the primary code executor. Never leave half-finished files or ask the user to manually edit code.
+- **Self-Verification Loop:** After creating or updating any backend (`server/`, `factory/`) or frontend (`public/`) files, you MUST run verification checks in the terminal (e.g., `node --check server/server.js`, `node --check factory/generate.js`) to guarantee zero syntax or runtime errors before finishing your turn.
+- **Zero-Dependency Backend Rule:** Use native Node.js modules (`http`, `fs`, `path`, `crypto`, and native global `fetch`) for all backend server, Telegram Bot API, and Gemini REST API calls (`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`). Do NOT depend on external npm packages unless strictly necessary. If an npm package is ever required, ALWAYS install using `@latest` (never hardcode old version numbers).
+
+## 2. Frontend & Zero-CDN Policy (`public/`)
+- **Frontend Stack:** Pure HTML5, Vanilla JavaScript (ES6+), and local CSS.
+- **Zero External CDN in HTML:** NEVER use external `<link>` or `<script>` tags. Always load local assets:
   - Font: `./fonts/Vazirmatn.woff2`
   - Math Engine: `./css/katex.min.css` and `./js/katex.min.js`
-- **RTL & Logical CSS:** The app is strictly Persian RTL (`dir="rtl" lang="fa"`). Always use CSS Logical Properties (`margin-inline`, `padding-inline`, `inset-inline-start`, `border-inline-start`).
-- **Math Isolation:** All math formulas rendered via `katex.renderToString()` MUST be wrapped in containers with `direction: ltr !important; unicode-bidi: isolate !important; display: inline-block;`.
+- **RTL & Math Isolation:** Strictly Persian RTL (`dir="rtl" lang="fa"`). Wrap all KaTeX output in containers with `direction: ltr !important; unicode-bidi: isolate !important; display: inline-block;`.
+- Delete `public/editor.html` as the pipeline is 100% automated.
 
-## 2. Telegram Mini App (TMA) UX & Security
-- Initialize `window.Telegram?.WebApp` safely with fallback for normal desktop browser testing (`Go Live`).
-- Call `ready()`, `expand()`, and `disableVerticalSwipes()` if running inside Telegram.
-- Trigger `HapticFeedback` on card flips (`impactOccurred('light')`), quiz answers (`notificationOccurred('success'|'error')`), and locked items.
-- Save flashcard Leitner statuses (`known`, `review`) in `Telegram.WebApp.CloudStorage` with automatic fallback to `localStorage`.
-- Render a subtle diagonal repeating watermark overlay showing the user's Telegram `@username` or ID across study cards (`pointer-events: none; user-select: none;`).
-- Disable text copying (`user-select: none`) and right-click context menu on study content.
+## 3. Telegram Mini App (TMA) & Anti-Piracy Architecture
+- Initialize `window.Telegram?.WebApp` safely with desktop browser fallback (`Go Live` / `localhost:3000`).
+- Server-Side Paywall Stripping: Direct browser access to `/data/*.json` MUST return `403 Forbidden`. Serve course data via `GET /api/course?id=...`. If the user has not purchased the course, strip/redact locked flashcard answers (`back`) and locked exam explanations (`explanation`) on the server before sending the JSON.
+- Validate `Telegram.WebApp.initData` via `HMAC-SHA256` with the `"WebAppData"` seed when `BOT_TOKEN` is set.
 
-## 3. Contextual AI Tutor & Follow-up Q&A Architecture
-- Every flashcard, summary item, and exam question MUST include a contextual action button: "💬 ابهامی داری؟ از همین نکته بپرس".
-- Clicking this button opens a sleek slide-up AI Chat Drawer pre-loaded with the context of that specific card/question and its `source_page`.
-- Provide quick-prompt chips inside the drawer (e.g., "ساده‌تر توضیح بده", "مثال عددی بزن", "نکته امتحانی این بخش چیه؟").
-- Include a 4th main tab ("⚡ حل سوال و چت با جزوه") allowing students to ask free-form questions or upload an exam problem image to be solved strictly based on the professor's lecture notes, complete with a remaining query quota badge.
+## 4. Self-Healing AI Factory & Anti-Spam Error Reporting
+- **Auto-Compiler Loop (`factory/generate.js`):** Load local `../public/js/katex.min.js` to validate every generated LaTeX formula with `katex.renderToString(expr, { throwOnError: true })`. Automatically fix broken formulas via Gemini REST API before saving.
+- **Continuous Memory (`factory/learned_rules.json`):** Inject learned rules into the generation prompt so OCR/formula mistakes are never repeated.
+- **Anti-Spam & AI Judge (`POST /api/report-issue`):**
+  - Enforce rate limits: max 3 reports/day per user, 120s cooldown between reports, shadow-ban after 3 rejected strikes, and lock items that already have a pending report.
+  - Validate student error claims with an AI Fact-Checker pass before queuing for 1-click admin approval in Telegram (`approve_<id>` / `reject_<id>`). Grant +2 bonus AI chat quota ONLY after approval.

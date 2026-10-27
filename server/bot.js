@@ -9,11 +9,13 @@ const __dirname = path.dirname(__filename);
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const ADMIN_CHAT_ID = String(process.env.ADMIN_CHAT_ID || '');
-const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-domain.ir';
+const WEBAPP_URL = process.env.WEBAPP_URL || 'http://localhost:3000';
 
 let lastUpdateId = 0;
+let isPolling = false;
 
 async function tgApi(method, bodyObj) {
+  if (!BOT_TOKEN) return { ok: false };
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -24,6 +26,9 @@ async function tgApi(method, bodyObj) {
 
 async function downloadTelegramFile(fileId, destPath) {
   const info = await tgApi('getFile', { file_id: fileId });
+  if (!info.ok || !info.result?.file_path) {
+    throw new Error('دریافت آدرس فایل از تلگرام ناموفق بود.');
+  }
   const filePath = info.result.file_path;
   const fileRes = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
   const buffer = Buffer.from(await fileRes.arrayBuffer());
@@ -46,6 +51,7 @@ async function handleUpdate(update) {
       if (!rep || rep.status !== 'pending_admin') return;
 
       rep.status = 'approved';
+      delete DB.reportedItemsLock[`${rep.courseId}_${rep.itemId}`];
 
       // اضافه کردن قانون جدید به حافظه learned_rules.json تا مدل دیگر تکرار نکند
       const rulesPath = path.join(__dirname, '../factory/learned_rules.json');
@@ -73,6 +79,8 @@ async function handleUpdate(update) {
       if (!rep) return;
 
       rep.status = 'rejected';
+      delete DB.reportedItemsLock[`${rep.courseId}_${rep.itemId}`];
+
       const st = getUserStats(rep.userId);
       st.rejectedStrikes = (st.rejectedStrikes || 0) + 1;
       saveDB();
@@ -83,14 +91,15 @@ async function handleUpdate(update) {
     // ج) تایید تک‌کلیکی رسید کارت‌به‌کارت دانشجو
     if (data.startsWith('unlock_')) {
       const [, targetUserId, courseId] = data.split('|');
-      DB.purchases[`${targetUserId}_${courseId}`] = true;
+      const finalCourseId = courseId || 'sample_course';
+      DB.purchases[`${targetUserId}_${finalCourseId}`] = true;
       saveDB();
 
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🔓 پکیج برای دانشجو باز شد!' });
       await notifyTelegram(
         targetUserId,
         '✅ <b>پرداخت شما تایید شد و قفل کامل پکیج باز گردید!</b>\nهم‌اکنون می‌توانید وارد جزوه زنده شوید و به تمام فلش‌کارت‌ها، سوالات پایانترم و ۱۰۰ پرسش هوش مصنوعی دسترسی داشته باشید.',
-        [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${WEBAPP_URL}/?course=sample_course` } }]]
+        [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${WEBAPP_URL}/?course=${finalCourseId}` } }]]
       );
     }
     return;
@@ -157,7 +166,7 @@ async function handleUpdate(update) {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [[
-          { text: '✅ تایید و باز کردن قفل آنی', callback_data: `unlock_|${chatId}|ut_metal_thermo_01` }
+          { text: '✅ تایید و باز کردن قفل آنی', callback_data: `unlock_|${chatId}|sample_course` }
         ]]
       }
     });
@@ -170,8 +179,11 @@ export async function startTelegramBotPolling() {
     console.log('ℹ️ متغیر BOT_TOKEN تنظیم نشده است؛ ربات تلگرام در حالت آماده به کار (خاموش) قرار دارد.');
     return;
   }
+  if (isPolling) return;
+  isPolling = true;
+
   console.log('🤖 ربات تلگرام جزوه زنده (Long-Polling) فعال شد!');
-  while (true) {
+  while (isPolling) {
     try {
       const data = await tgApi('getUpdates', { offset: lastUpdateId + 1, timeout: 25 });
       if (data.ok && Array.isArray(data.result)) {
@@ -185,5 +197,3 @@ export async function startTelegramBotPolling() {
     }
   }
 }
-
-startTelegramBotPolling();

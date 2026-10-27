@@ -1,9 +1,0 @@
-{
-  "name": "jozveh-saz-factory",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "AI Content Factory for converting handwritten Persian lecture notes to structured JSON",
-  "dependencies": {
-    "@google/genai": "^0.1.2"
-  }
-}
