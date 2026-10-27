@@ -105,6 +105,34 @@ async function handleUpdate(update) {
         [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${WEBAPP_URL}/?course=${finalCourseId}` } }]]
       );
     }
+    // د) تایید تسویه حساب جزوه‌نویس (پرداخت سهم ۷۰٪)
+    if (data.startsWith('approve_payout_')) {
+      const payoutId = data.replace('approve_payout_', '');
+      const pr = (DB.payoutRequests || {})[payoutId];
+      if (!pr || pr.status !== 'pending') return;
+      pr.status = 'approved';
+      const stats = DB.creatorEarnings[pr.creatorId];
+      if (stats) {
+        stats.balanceToman = Math.max(0, (stats.balanceToman || 0) - pr.amount);
+        stats.history = stats.history || [];
+        stats.history.push({ type: 'payout', amount: pr.amount, at: Date.now(), status: 'paid' });
+      }
+      saveDB();
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ تسویه تایید و ثبت شد.' });
+      await notifyTelegram(pr.creatorId, `✅ <b>تسویه حساب شما تایید شد!</b>\\nمبلغ ${pr.amount.toLocaleString('fa-IR')} تومان به شماره شبا ${pr.sheba} واریز گردید.`);
+    }
+
+    if (data.startsWith('reject_payout_')) {
+      const payoutId = data.replace('reject_payout_', '');
+      const pr = (DB.payoutRequests || {})[payoutId];
+      if (!pr) return;
+      pr.status = 'rejected';
+      saveDB();
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 تسویه رد شد.' });
+      await notifyTelegram(pr.creatorId, '🚫 <b>درخواست تسویه شما رد شد.</b> لطفاً با پشتیبانی تماس بگیرید.');
+    }
+
+
     return;
   }
 
@@ -148,6 +176,50 @@ async function handleUpdate(update) {
     );
     return;
   }
+
+  // ۳.۱ دستور /payout برای ثبت شبا و درخواست تسویه حساب جزوه‌نویسان
+  if (msg.text && msg.text.startsWith('/payout')) {
+    const parts = msg.text.trim().split(/\s+/);
+    const stats = DB.creatorEarnings[chatId] || { balanceToman: 0, salesCount: 0, history: [] };
+    const balance = Number(stats.balanceToman || 0);
+
+    if (parts.length >= 2 && /^IR[0-9]{24}$/i.test(parts[1])) {
+      const sheba = parts[1].toUpperCase();
+      DB.creatorSheba = DB.creatorSheba || {};
+      DB.creatorSheba[chatId] = sheba;
+
+      if (balance <= 0) {
+        await notifyTelegram(chatId, `🏦 شماره شبا ${sheba} ثبت شد.\\nموجودی قابل تسویه شما در حال حاضر ۰ تومان است.`);
+        saveDB();
+        return;
+      }
+
+      DB.payoutRequests = DB.payoutRequests || {};
+      const payoutId = `payout_${Date.now()}`;
+      DB.payoutRequests[payoutId] = { creatorId: chatId, sheba, amount: balance, status: 'pending', createdAt: Date.now() };
+      saveDB();
+
+      await notifyTelegram(ADMIN_CHAT_ID, `💸 <b>درخواست تسویه جزوه‌نویس</b>\\n👤 ${chatId}\\n🏦 ${sheba}\\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
+        { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
+        { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
+      ]]);
+
+      await notifyTelegram(chatId, `✅ شماره شبا ${sheba} ثبت شد و درخواست تسویه ${balance.toLocaleString('fa-IR')} تومان برای ادمین ارسال گردید.`);
+      return;
+    }
+
+    const savedSheba = (DB.creatorSheba || {})[chatId] || 'ثبت نشده';
+    await notifyTelegram(
+      chatId,
+      `🏦 <b>تسویه حساب جزوه‌نویس</b>\\n\\n` +
+      `💵 موجودی قابل تسویه: <b>${balance.toLocaleString('fa-IR')} تومان</b>\\n` +
+      `💳 شبا ثبت‌شده: <code>${savedSheba}</code>\\n\\n` +
+      `برای ثبت شبا و درخواست تسویه، دستور زیر را ارسال کنید:\\n` +
+      `<code>/payout IR123456789012345678901234</code>`
+    );
+    return;
+  }
+
 
   // ۴. اگر ادمین فایل PDF جزوه بفرستد <- تبدیل خودکار به پکیج جزوه زنده!
   if (chatId === ADMIN_CHAT_ID && msg.document) {

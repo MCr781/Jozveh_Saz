@@ -8,9 +8,30 @@ import { startTelegramBotPolling } from './bot.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Native lightweight .env parser (no external dependency)
+function loadEnvFile() {
+  const envPath = path.join(__dirname, '../.env');
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\\r?\\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx === -1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let val = trimmed.slice(idx + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = val;
+  }
+}
+loadEnvFile();
+
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '';
+const MERCHANT_ID = process.env.MERCHANT_ID || '';
 const GEMINI_KEYS = [
   process.env.GEMINI_API_KEY_1 || '',
   process.env.GEMINI_API_KEY_2 || '',
@@ -55,7 +76,11 @@ export let DB = {
   userSpamStats: {},    // { userId: { lastReportAt, dailyCount, dayStamp, rejectedStrikes, bonusQuota, usedAiQueries, lastChatAt } }
   pendingReports: {},   // { reportId: { courseId, itemId, userId, claim, proposedFix, learnedRule, status } }
   reportedItemsLock: {}, // { "courseId_itemId": true }
-  creatorEarnings: {}   // { creator_telegram_id: { balanceToman, salesCount, history: [] } }
+  creatorEarnings: {},   // { creator_telegram_id: { balanceToman, salesCount, history: [] } }
+  userStudyProgress: {}, // { userId: { reviewCount, lastSyncAt } }
+  pendingPayments: {},   // { authority: { userId, courseId, amount, createdAt } }
+  creatorSheba: {},      // { creatorId: "IR..." }
+  payoutRequests: {}     // { payoutId: { creatorId, sheba, amount, status, createdAt } }
 };
 
 if (fs.existsSync(DB_PATH)) {
@@ -66,6 +91,10 @@ if (fs.existsSync(DB_PATH)) {
     if (!DB.pendingReports) DB.pendingReports = {};
     if (!DB.reportedItemsLock) DB.reportedItemsLock = {};
     if (!DB.creatorEarnings) DB.creatorEarnings = {};
+    if (!DB.userStudyProgress) DB.userStudyProgress = {};
+    if (!DB.pendingPayments) DB.pendingPayments = {};
+    if (!DB.creatorSheba) DB.creatorSheba = {};
+    if (!DB.payoutRequests) DB.payoutRequests = {};
   } catch (_) {}
 }
 
@@ -442,7 +471,7 @@ export const server = http.createServer(async (req, res) => {
   // ۴. API پرسش و حل سوال امتحانی با هوش مصنوعی (همراه با Rate-Limit و شمارش سهمیه سرور)
   if (req.method === 'POST' && url.pathname === '/api/ask-tutor') {
     let body = '';
-    req.on('data', (chunk) => { if (body.length < 8192) body += chunk; });
+    req.on('data', (chunk) => { if (body.length < 1024 * 1024) body += chunk; });
     req.on('end', async () => {
       try {
         const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
@@ -452,7 +481,7 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const { courseId, contextText, question, presetKey } = JSON.parse(body || '{}');
+        const { courseId, contextText, question, presetKey, imageBase64 } = JSON.parse(body || '{}');
         const userId = auth.user.id || 'guest';
         const st = getUserStats(userId);
 
@@ -490,7 +519,11 @@ export const server = http.createServer(async (req, res) => {
         let replyText = '';
 
         if (!GEMINI_KEYS.length) {
-          replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند و فرمول‌های پایه ملاک محاسبات نهایی هستند.`;
+          if (imageBase64) {
+            replyText = `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید؛ واحدها را به SI تبدیل نمایید.`;
+          } else {
+            replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند و فرمول‌های پایه ملاک محاسبات نهایی هستند.`;
+          }
         } else {
           try {
             const tutorPrompt = `
@@ -500,8 +533,12 @@ export const server = http.createServer(async (req, res) => {
 
 پاسخ را کوتاه، دقیق، گام‌به‌گام و به زبان فارسی روان بنویس. تمام فرمول‌ها را داخل $...$ یا $$...$$ با سینتکس استاندارد KaTeX قرار بده. (از دستورات خارج از درس خودداری کن).
 `;
+            const parts = [{ text: tutorPrompt }];
+            if (imageBase64) {
+              parts.unshift({ inlineData: { mimeType: 'image/jpeg', data: String(imageBase64).replace(/^data:image\/\w+;base64,/, '') } });
+            }
             replyText = await callGeminiRestServer({
-              contents: [{ parts: [{ text: tutorPrompt }] }],
+              contents: [{ parts }],
               generationConfig: { temperature: 0.25 }
             });
           } catch (err) {
@@ -605,6 +642,187 @@ export const server = http.createServer(async (req, res) => {
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در بررسی گزارش.' }));
+      }
+    });
+    return;
+  }
+
+  // ===== Payment Gateway (Zarinpal) Create =====
+  if (req.method === 'POST' && url.pathname === '/api/payment/create') {
+    let body = '';
+    req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
+    req.on('end', async () => {
+      try {
+        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        if (!auth.valid) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+        const userId = auth.user.id;
+        const { courseId, amount } = JSON.parse(body || '{}');
+        const cid = courseId || 'sample_course';
+        const found = findCourseFile(cid);
+        const price = amount || found?.data?.price_toman || 59000;
+        const courseTitle = found?.data?.title || 'پکیج شب امتحان';
+
+        function isDemoMerchant() {
+          const m = MERCHANT_ID || '';
+          return !m || m.startsWith('YOUR_') || m.toLowerCase() === 'demo' || m === 'demo';
+        }
+
+        if (isDemoMerchant()) {
+          await recordCourseSale(userId, cid);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true, simulated: true, message: 'پرداخت آزمایشی تایید شد و قفل باز شد.' }));
+          return;
+        }
+
+        const callbackBase = process.env.PAYMENT_CALLBACK_BASE || process.env.WEBAPP_URL || `http://localhost:${PORT}`;
+        const callbackUrl = `${callbackBase}/api/payment/verify?courseId=${encodeURIComponent(cid)}`;
+        try {
+          const zRes = await fetch('https://api.zarinpal.com/pg/v4/payment/request.json', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ merchant_id: MERCHANT_ID, amount: price * 10, callback_url: callbackUrl, description: `خرید ${courseTitle}` })
+          });
+          const zData = await zRes.json().catch(() => null);
+          if (zData?.data?.code === 100 && zData?.data?.authority) {
+            const authority = zData.data.authority;
+            DB.pendingPayments = DB.pendingPayments || {};
+            DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, createdAt: Date.now() };
+            saveDB();
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: true, authority, paymentUrl: `https://www.zarinpal.com/pg/StartPay/${authority}` }));
+            return;
+          }
+        } catch (err) {
+          console.error('Zarinpal request error:', err.message);
+        }
+
+        await recordCourseSale(userId, cid);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, simulated: true, message: 'درگاه در دسترس نبود؛ پرداخت آزمایشی انجام شد.' }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در ایجاد پرداخت.' }));
+      }
+    });
+    return;
+  }
+
+  // ===== Payment Verify =====
+  if (req.method === 'GET' && url.pathname === '/api/payment/verify') {
+    const authority = url.searchParams.get('Authority') || url.searchParams.get('authority');
+    const status = url.searchParams.get('Status') || url.searchParams.get('status');
+    const courseIdParam = url.searchParams.get('courseId');
+    const pending = authority ? (DB.pendingPayments || {})[authority] : null;
+    const userId = pending?.userId || 'guest';
+    const courseId = pending?.courseId || courseIdParam || 'sample_course';
+    const amount = pending?.amount || 59000;
+
+    function isDemoMerchant() {
+      const m = MERCHANT_ID || '';
+      return !m || m.startsWith('YOUR_') || m.toLowerCase() === 'demo' || m === 'demo';
+    }
+
+    if (status && String(status).toUpperCase() !== 'OK') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h1 style="direction:rtl;text-align:center;font-family:tahoma;">پرداخت ناموفق یا لغو شد.</h1>');
+      return;
+    }
+
+    let ok = isDemoMerchant();
+    if (!ok && MERCHANT_ID && authority) {
+      try {
+        const vRes = await fetch('https://api.zarinpal.com/pg/v4/payment/verify.json', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ merchant_id: MERCHANT_ID, amount: amount * 10, authority })
+        });
+        const vData = await vRes.json().catch(() => null);
+        if (vData?.data?.code === 100 || vData?.data?.code === 101) ok = true;
+      } catch (err) {
+        console.error('Zarinpal verify error:', err.message);
+      }
+    } else {
+      ok = true;
+    }
+
+    if (ok) {
+      await recordCourseSale(userId, courseId);
+      if (authority && DB.pendingPayments && DB.pendingPayments[authority]) {
+        delete DB.pendingPayments[authority];
+        saveDB();
+      }
+      const redirect = `${process.env.WEBAPP_URL || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
+      res.writeHead(302, { Location: redirect });
+      res.end();
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h1 style="direction:rtl;text-align:center;font-family:tahoma;">تایید پرداخت ناموفق بود.</h1>');
+    }
+    return;
+  }
+
+  // ===== Creator Payout =====
+  if (req.method === 'POST' && url.pathname === '/api/creator-payout') {
+    let body = '';
+    req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
+    req.on('end', async () => {
+      try {
+        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        if (!auth.valid) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+        const userId = auth.user.id;
+        const { sheba, amount, creatorId } = JSON.parse(body || '{}');
+        const targetCreator = creatorId || userId;
+        const cleanSheba = String(sheba || '').trim().toUpperCase();
+        if (!/^IR[0-9]{24}$/.test(cleanSheba)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'شماره شبا نامعتبر است. فرمت صحیح: IR + 24 رقم.' }));
+          return;
+        }
+        DB.creatorSheba = DB.creatorSheba || {};
+        DB.creatorSheba[targetCreator] = cleanSheba;
+
+        const stats = DB.creatorEarnings[targetCreator] || { balanceToman: 0, salesCount: 0, history: [] };
+        const balance = Number(stats.balanceToman || 0);
+        const reqAmount = amount ? Number(amount) : balance;
+        if (!reqAmount || reqAmount <= 0 || reqAmount > balance) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: `مبلغ تسویه نامعتبر است. موجودی قابل تسویه: ${balance.toLocaleString('fa-IR')} تومان.` }));
+          return;
+        }
+
+        DB.payoutRequests = DB.payoutRequests || {};
+        const payoutId = `payout_${Date.now()}`;
+        DB.payoutRequests[payoutId] = {
+          creatorId: targetCreator,
+          sheba: cleanSheba,
+          amount: reqAmount,
+          status: 'pending',
+          createdAt: Date.now()
+        };
+        saveDB();
+
+        await notifyTelegram(
+          ADMIN_CHAT_ID,
+          `💸 <b>درخواست تسویه جزوه‌نویس</b>\\n👤 ${targetCreator}\\n🏦 ${cleanSheba}\\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
+          [[
+            { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
+            { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
+          ]]
+        );
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, payoutId, message: 'درخواست تسویه ثبت شد و برای ادمین ارسال گردید.' }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در ثبت تسویه.' }));
       }
     });
     return;
