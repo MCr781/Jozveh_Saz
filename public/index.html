@@ -11,14 +11,26 @@
   <div class="app-shell">
     <!-- Sticky Header -->
     <header class="top-header">
+      <div class="header-top-bar">
+        <button class="catalog-btn-header" onclick="openCatalogModal()" id="catalogOpenBtn">
+          <span>📚</span>
+          <span>فهرست دروس</span>
+        </button>
+        <div class="header-top-actions">
+          <button class="share-btn-header" onclick="shareCurrentCourse()" title="اشتراک‌گذاری در گروه تلگرام">
+            <span>📤</span>
+            <span>اشتراک درس</span>
+          </button>
+          <button class="pro-badge" id="headerProBtn" onclick="openPaywallModal()">
+            🔓 نسخه کامل (۵۹ ت)
+          </button>
+        </div>
+      </div>
       <div class="header-row">
         <div>
           <h1 class="course-title" id="courseTitle">در حال بارگذاری جزوه...</h1>
           <p class="course-subtitle" id="courseSubtitle"></p>
         </div>
-        <button class="pro-badge" id="headerProBtn" onclick="openPaywallModal()">
-          🔓 نسخه کامل (۵۹ ت)
-        </button>
       </div>
       <div class="progress-bar-wrap">
         <div class="progress-track">
@@ -105,8 +117,8 @@
       </div>
 
       <div class="quick-chips-row">
-        <button class="chip-prompt" onclick="sendMainTabQuestion('simplify', 'مفهوم انرژی آزاد گیبس رو خیلی ساده توضیح بده')">💡 توضیح خودمانی گیبس</button>
-        <button class="chip-prompt" onclick="sendMainTabQuestion('example', 'یک مثال عددی امتحانی از دمای تعادل حل کن')">📐 حل مثال عددی امتحانی</button>
+        <button class="chip-prompt" onclick="sendMainTabQuestion('simplify', 'مفهوم فرمول را خیلی ساده توضیح بده')">💡 توضیح خودمانی</button>
+        <button class="chip-prompt" onclick="sendMainTabQuestion('example', 'یک مثال عددی امتحانی حل کن')">📐 حل مثال عددی امتحانی</button>
         <button class="chip-prompt" onclick="sendMainTabQuestion('exam_tip', 'مهم‌ترین دام تستی و امتحانی این فصل چیه؟')">⚠️ دام‌های امتحانی استاد</button>
       </div>
 
@@ -116,6 +128,61 @@
         <button class="chat-send-btn" onclick="sendMainTabQuestion('default')">ارسال</button>
       </div>
     </section>
+  </div>
+
+  <!-- Multi-Course Catalog & Creator Revenue Hub Modal -->
+  <div class="modal-backdrop" id="catalogBackdrop">
+    <div class="bottom-sheet catalog-sheet">
+      <div class="sheet-header">
+        <div>
+          <strong style="font-size:1rem;">📚 کاتالوگ جزوات شب امتحان</strong>
+          <div style="font-size:0.75rem; color:#94a3b8;">انتخاب درس و دسترسی به خلاصه و سوالات پایانترم</div>
+        </div>
+        <button class="close-sheet-btn" onclick="closeCatalogModal()">✕</button>
+      </div>
+
+      <!-- Creator Revenue 70% Hub Banner -->
+      <div class="creator-hub-banner" onclick="openCreatorInfoModal()">
+        <div class="creator-hub-header">
+          <div>
+            <strong style="color:#38bdf8; font-size:0.88rem;">💰 پنل جزوه‌نویسان (کسب درآمد ۷۰٪)</strong>
+            <div style="font-size:0.73rem; color:#cbd5e1; margin-top:2px;">
+              جزوه دست‌نویس خودت رو بفرست، ۷۰٪ از هر فروش مستقیماً به حسابت واریز می‌شه!
+            </div>
+          </div>
+          <span class="badge-pill-cyan">۷۰٪ سهم شما</span>
+        </div>
+        <div class="creator-stats-preview" id="creatorStatsBox">
+          <div class="creator-stat-item">
+            <span class="stat-num" id="creatorSalesCount">۰ پکیج</span>
+            <span class="stat-lbl">تعداد فروش پکیج‌ها</span>
+          </div>
+          <div class="creator-stat-item">
+            <span class="stat-num" id="creatorBalanceToman">۰ تومان</span>
+            <span class="stat-lbl">موجودی قابل تسویه</span>
+          </div>
+        </div>
+        <div class="creator-cta-row">
+          <span>🤖 ارسال فایل PDF در تلگرام جهت انتشار خودکار ←</span>
+        </div>
+      </div>
+
+      <!-- Search & Filters -->
+      <div class="catalog-search-wrap">
+        <input type="text" class="catalog-search-input" id="catalogSearchInput" placeholder="🔍 جستجو در نام درس، استاد یا جزوه‌نویس..." oninput="filterCatalogList()" />
+      </div>
+
+      <div class="filter-pills catalog-pills">
+        <button class="pill-btn active" onclick="setCatalogCategory('all', this)">همه دروس</button>
+        <button class="pill-btn" onclick="setCatalogCategory('مهندسی مواد و متالورژی', this)">مهندسی مواد و متالورژی</button>
+        <button class="pill-btn" onclick="setCatalogCategory('دروس پایه مهندسی', this)">دروس پایه مهندسی</button>
+      </div>
+
+      <!-- Courses List Container -->
+      <div class="catalog-courses-list" id="catalogCoursesContainer">
+        <!-- Rendered dynamically -->
+      </div>
+    </div>
   </div>
 
   <!-- Contextual AI Follow-up Slide-up Drawer -->
@@ -152,7 +219,7 @@
         <button class="close-sheet-btn" onclick="closePaywallModal()">✕</button>
       </div>
       <p style="font-size:0.83rem; color:#cbd5e1; margin-bottom:10px;">
-        با تهیه این پکیج به تمامی ۵۰ فلش‌کارت لایتنر، بانک سوالات پایانترم با پاسخ تشریحی و <strong>۱۰۰ پرسش از هوش مصنوعی حل سوال</strong> دسترسی دائم خواهید داشت.
+        با تهیه این پکیج به تمامی فلش‌کارت‌های لایتنر، بانک سوالات پایانترم با پاسخ تشریحی و <strong>۱۰۰ پرسش از هوش مصنوعی حل سوال</strong> دسترسی دائم خواهید داشت.
       </p>
 
       <button class="pay-option-card" onclick="simulateUnlockPurchase('درگاه بانکی شاپرک')">
@@ -160,7 +227,7 @@
           <div style="font-weight:700; color:#34d399;">💳 پرداخت آنلاین و باز شدن آنی</div>
           <div style="font-size:0.74rem; color:#94a3b8;">درگاه مستقیم بانکی (بدون فیلترشکن)</div>
         </div>
-        <strong>۵۹,۰۰۰ تومان</strong>
+        <strong id="paywallPriceShaparak">۵۹,۰۰۰ تومان</strong>
       </button>
 
       <button class="pay-option-card" onclick="simulateUnlockPurchase('کارت به کارت تلگرامی')">
@@ -168,7 +235,7 @@
           <div style="font-weight:700; color:#a5b4fc;">⚡ کارت به کارت سریع در ربات</div>
           <div style="font-size:0.74rem; color:#94a3b8;">مخصوص کاربران با VPN روشن (تایید در ۱۰ ثانیه)</div>
         </div>
-        <strong>۵۹,۰۰۰ تومان</strong>
+        <strong id="paywallPriceCard">۵۹,۰۰۰ تومان</strong>
       </button>
     </div>
   </div>

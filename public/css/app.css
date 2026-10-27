@@ -754,3 +754,244 @@ html, body {
   justify-content: space-between;
   align-items: center;
 }
+
+
+/* --- Milestone 3: Multi-Course Catalog & Creator Revenue Hub --- */
+.header-top-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-block-end: 8px;
+  gap: 8px;
+}
+
+.catalog-btn-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid var(--border-highlight);
+  color: #e0e7ff;
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.catalog-btn-header:hover {
+  background: var(--accent-glow);
+  border-color: var(--accent-primary);
+}
+
+.header-top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.share-btn-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.share-btn-header:hover {
+  background: rgba(16, 185, 129, 0.25);
+}
+
+.catalog-sheet {
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.creator-hub-banner {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.15), rgba(99, 102, 241, 0.15));
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-block-end: 12px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.creator-hub-banner:hover {
+  border-color: #38bdf8;
+}
+
+.creator-hub-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.badge-pill-cyan {
+  background: #0284c7;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.creator-stats-preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-block-start: 10px;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.creator-stat-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.creator-stat-item .stat-num {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #38bdf8;
+}
+
+.creator-stat-item .stat-lbl {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+}
+
+.creator-cta-row {
+  margin-block-start: 8px;
+  font-size: 0.72rem;
+  color: #a5b4fc;
+  font-weight: 600;
+}
+
+.catalog-search-wrap {
+  margin-block-end: 8px;
+}
+
+.catalog-search-input {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.catalog-search-input:focus {
+  border-color: var(--accent-primary);
+}
+
+.catalog-pills {
+  margin-block-end: 12px;
+  overflow-x: auto;
+  padding-block-end: 4px;
+  display: flex;
+  gap: 6px;
+}
+
+.catalog-courses-list {
+  overflow-y: auto;
+  max-height: 48vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-inline-end: 2px;
+}
+
+.course-catalog-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.course-catalog-card:hover, .course-catalog-card.active-course {
+  border-color: var(--border-highlight);
+  background: rgba(30, 41, 59, 0.85);
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+.course-catalog-card.active-course::before {
+  content: 'در حال مطالعه';
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.catalog-card-category {
+  font-size: 0.68rem;
+  color: #a5b4fc;
+  font-weight: 700;
+  margin-block-end: 3px;
+}
+
+.catalog-card-title {
+  font-size: 0.92rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.4;
+  margin-block-end: 4px;
+}
+
+.catalog-card-instructor {
+  font-size: 0.73rem;
+  color: var(--text-secondary);
+  margin-block-end: 8px;
+}
+
+.catalog-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-block-start: 1px solid rgba(148, 163, 184, 0.1);
+  padding-block-start: 8px;
+  margin-block-start: 6px;
+  font-size: 0.72rem;
+}
+
+.catalog-card-badges {
+  display: flex;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.catalog-card-price {
+  font-weight: 800;
+  color: #fbbf24;
+}
+
+.catalog-card-price.unlocked-pro {
+  color: #34d399;
+}

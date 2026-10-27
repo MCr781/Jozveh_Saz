@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { DB, saveDB, getUserStats, notifyTelegram } from './server.js';
+import { DB, saveDB, getUserStats, notifyTelegram, recordCourseSale } from './server.js';
 import { generateCoursePackage } from '../factory/generate.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,7 +36,7 @@ async function downloadTelegramFile(fileId, destPath) {
 }
 
 async function handleUpdate(update) {
-  // ۱. مدیریت دکمه‌های شیشه‌ای ادمین (تایید خطا + تایید پرداخت کارت‌به‌کارت)
+  // ۱. مدیریت دکمه‌های شیشه‌ای ادمین (تایید خطا + تایید پرداخت کارت‌به‌کارت با واریز سهم ۷۰٪)
   if (update.callback_query) {
     const cb = update.callback_query;
     const fromId = String(cb.from.id);
@@ -88,14 +88,17 @@ async function handleUpdate(update) {
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 گزارش رد شد و ۱ اخطار اسپم ثبت گردید.' });
     }
 
-    // ج) تایید تک‌کلیکی رسید کارت‌به‌کارت دانشجو
+    // ج) تایید تک‌کلیکی رسید کارت‌به‌کارت دانشجو و واریز ۷۰٪ سهم جزوه‌نویس
     if (data.startsWith('unlock_')) {
       const [, targetUserId, courseId] = data.split('|');
       const finalCourseId = courseId || 'sample_course';
-      DB.purchases[`${targetUserId}_${finalCourseId}`] = true;
-      saveDB();
+      const saleResult = await recordCourseSale(targetUserId, finalCourseId);
 
-      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🔓 پکیج برای دانشجو باز شد!' });
+      await tgApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: `🔓 پکیج باز شد و ${(saleResult.creatorShareToman || 0).toLocaleString('fa-IR')} ت به حساب جزوه‌نویس منظور گردید!`
+      });
+
       await notifyTelegram(
         targetUserId,
         '✅ <b>پرداخت شما تایید شد و قفل کامل پکیج باز گردید!</b>\nهم‌اکنون می‌توانید وارد جزوه زنده شوید و به تمام فلش‌کارت‌ها، سوالات پایانترم و ۱۰۰ پرسش هوش مصنوعی دسترسی داشته باشید.',
@@ -117,14 +120,36 @@ async function handleUpdate(update) {
       '📑 فرمول‌نامه استاندارد با رندر ریاضی\n' +
       '🗂️ فلش‌کارت‌های سه‌بعدی لایتنر شب امتحان\n' +
       '📝 شبیه‌ساز سوالات امتحانی استاد با پاسخ تشریحی\n' +
-      '⚡ دستیار هوش مصنوعی حل سوال (بدون نیاز به فیلترشکن)\n\n' +
+      '⚡ دستیار هوش مصنوعی حل سوال (بدون نیاز به فیلترشکن)\n' +
+      '💰 امکان کسب درآمد ۷۰٪ از فروش جزوه دست‌نویس خودتان\n\n' +
       '👇 برای شروع روی دکمه زیر بزنید یا اگر رسید کارت‌به‌کارت دارید، عکس آن را همین‌جا بفرستید:',
-      [[{ text: '🎓 باز کردن پکیج ترمودینامیک و خواص مواد', web_app: { url: `${WEBAPP_URL}/?course=sample_course` } }]]
+      [
+        [{ text: '🎓 ورود به جزوه زنده (کاتالوگ دروس)', web_app: { url: `${WEBAPP_URL}/` } }],
+        [{ text: '💰 داشبورد درآمد جزوه‌نویس (/income)', callback_data: 'cmd_income' }]
+      ]
     );
     return;
   }
 
-  // ۳. اگر ادمین فایل PDF جزوه بفرستد <- تبدیل خودکار به پکیج جزوه زنده!
+  // ۳. دستور /income برای مشاهده درآمد و تسویه حساب جزوه‌نویسان
+  if (msg.text && (msg.text.startsWith('/income') || msg.text === 'درآمد')) {
+    const stats = DB.creatorEarnings[chatId] || { balanceToman: 0, salesCount: 0, history: [] };
+    const balanceStr = (stats.balanceToman || 0).toLocaleString('fa-IR');
+    const salesStr = (stats.salesCount || 0).toLocaleString('fa-IR');
+
+    await notifyTelegram(
+      chatId,
+      `💰 <b>داشبورد درآمد جزوه‌نویس (سهم ۷۰٪)</b>\n\n` +
+      `👤 شناسه شما: <code>${chatId}</code>\n` +
+      `📊 تعداد کل فروش: <b>${salesStr} پکیج</b>\n` +
+      `💵 موجودی قابل تسویه: <b>${balanceStr} تومان</b>\n\n` +
+      `💡 <i>تسویه حساب‌ها هر پنج‌شنبه به شماره شبای ثبت‌شده شما واریز می‌شود. برای ثبت جزوه جدید، فایل PDF خود را همین‌جا ارسال کنید.</i>`,
+      [[{ text: '📚 باز کردن کاتالوگ جزوات', web_app: { url: `${WEBAPP_URL}/` } }]]
+    );
+    return;
+  }
+
+  // ۴. اگر ادمین فایل PDF جزوه بفرستد <- تبدیل خودکار به پکیج جزوه زنده!
   if (chatId === ADMIN_CHAT_ID && msg.document) {
     const uploadsDir = path.join(__dirname, 'uploads');
     fs.mkdirSync(uploadsDir, { recursive: true });
@@ -156,7 +181,7 @@ async function handleUpdate(update) {
     return;
   }
 
-  // ۴. اگر دانشجو عکس رسید کارت‌به‌کارت بفرستد <- ارسال برای ادمین با دکمه تایید ۱ کلیکی
+  // ۵. اگر دانشجو عکس رسید کارت‌به‌کارت بفرستد <- ارسال برای ادمین با دکمه تایید ۱ کلیکی
   if (msg.photo && chatId !== ADMIN_CHAT_ID) {
     const bestPhoto = msg.photo[msg.photo.length - 1].file_id;
     await tgApi('sendPhoto', {

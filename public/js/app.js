@@ -1,12 +1,17 @@
 const AppState = {
   course: null,
+  currentCourseSlug: 'sample_course',
+  catalog: [],
+  catalogCategory: 'all',
+  catalogSearchQuery: '',
   currentCardIndex: 0,
   cardFilter: 'all', // 'all' | 'review'
   leitnerStatus: {}, // { fc_1: 'known' | 'review' }
   quizAnswers: {},
   isProUnlocked: false,
   aiRemainingFree: 3,
-  activeContextItem: null
+  activeContextItem: null,
+  creatorStats: { balanceToman: 0, salesCount: 0 }
 };
 
 // Helper: Determine API base URL (supports direct server access & Live Server port 5500)
@@ -101,15 +106,13 @@ function getItemById(itemId) {
   return null;
 }
 
-async function initStudyPlayer() {
-  window.TMA.initApp();
-
-  const urlParams = new URLSearchParams(window.location.search);
-  const courseSlug = urlParams.get('course') || 'sample_course';
+// بارگذاری جزوه مشخص‌شده با جابه‌جایی آنی بدون نیاز به ریفرش کامل مرورگر
+async function loadCourseData(courseSlug) {
+  AppState.currentCourseSlug = courseSlug;
   const apiBase = getApiBase();
 
   try {
-    // تلاش اول: دریافت امن از سرور همراه با بررسی وضعیت خرید و سهمیه واقعی
+    // ۱. دریافت داده‌ها از API سرور همراه با بررسی وضعیت خرید Pro
     const apiRes = await fetch(`${apiBase}/api/course?id=${encodeURIComponent(courseSlug)}`, {
       headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
     });
@@ -121,12 +124,13 @@ async function initStudyPlayer() {
     AppState.isProUnlocked = Boolean(payload.isProUnlocked);
     AppState.aiRemainingFree = payload.remainingAiQuota !== undefined ? payload.remainingAiQuota : 3;
   } catch (_) {
-    // تلاش دوم (Fallback مخصوص تست آفلاین / VS Code Live Server): خواندن فایل لوکال
+    // ۲. Fallback مخصوص تست آفلاین و VS Code Live Server
     const res = await fetch(`./data/${courseSlug}.json`);
     AppState.course = await res.json();
     AppState.aiRemainingFree = AppState.course.ai_quota_free || 3;
   }
 
+  AppState.currentCardIndex = 0;
   window.TMA.loadProgress(`progress_${AppState.course.id}`, (saved) => {
     AppState.leitnerStatus = saved.leitnerStatus || {};
     if (saved.isProUnlocked) AppState.isProUnlocked = true;
@@ -135,7 +139,88 @@ async function initStudyPlayer() {
     renderFlashcardView();
     renderExamQuiz();
     renderAiQuotaBadge();
+    updatePaywallModalPrices();
   });
+}
+
+// دریافت کاتالوگ تمام دروس موجود
+async function fetchCatalog() {
+  const apiBase = getApiBase();
+  try {
+    const res = await fetch(`${apiBase}/api/courses`, {
+      headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
+    });
+    if (!res.ok) throw new Error('Catalog fetch failed');
+    const data = await res.json();
+    if (data.ok && Array.isArray(data.courses) && data.courses.length > 0) {
+      AppState.catalog = data.courses;
+      renderCatalogCourses();
+      return;
+    }
+  } catch (_) {}
+
+  // Fallback محلی برای حالت آفلاین
+  AppState.catalog = [
+    {
+      id: 'ut_metal_thermo_01',
+      slug: 'sample_course',
+      title: 'پکیج شب امتحان ترمودینامیک و خواص مواد',
+      instructor: 'منطبق بر جزوه و سوالات پایانترم دانشگاه تهران',
+      creator: 'گردآوری: رتبه ۱ ورودی ۱۴۰۱',
+      category: 'مهندسی مواد و متالورژی',
+      price_toman: 59000,
+      flashcards_count: 6,
+      questions_count: 5,
+      isProUnlocked: false
+    },
+    {
+      id: 'eng_math_01',
+      slug: 'eng_math_01',
+      title: 'پکیج شب امتحان ریاضی مهندسی - معادلات دیفرانسیل با مشتقات جزئی و فوریه',
+      instructor: 'منطبق بر سرفصل‌های دانشگاه تهران و صنعتی شریف',
+      creator: 'گردآوری: سارا محمدی (رتبه ۲ ورودی ۱۴۰۱)',
+      category: 'دروس پایه مهندسی',
+      price_toman: 69000,
+      flashcards_count: 4,
+      questions_count: 4,
+      isProUnlocked: false
+    }
+  ];
+  renderCatalogCourses();
+}
+
+// دریافت آمار سهم ۷۰ درصدی جزوه‌نویس
+async function fetchCreatorStats() {
+  const apiBase = getApiBase();
+  try {
+    const res = await fetch(`${apiBase}/api/creator-stats`, {
+      headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.ok) {
+        AppState.creatorStats = {
+          balanceToman: data.balanceToman || 0,
+          salesCount: data.salesCount || 0
+        };
+        const salesEl = document.getElementById('creatorSalesCount');
+        const balEl = document.getElementById('creatorBalanceToman');
+        if (salesEl) salesEl.textContent = `${(data.salesCount || 0).toLocaleString('fa-IR')} پکیج`;
+        if (balEl) balEl.textContent = `${(data.balanceToman || 0).toLocaleString('fa-IR')} تومان`;
+      }
+    }
+  } catch (_) {}
+}
+
+async function initStudyPlayer() {
+  window.TMA.initApp();
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const courseSlug = urlParams.get('course') || 'sample_course';
+
+  await loadCourseData(courseSlug);
+  fetchCatalog();
+  fetchCreatorStats();
 
   setupTabSwitching();
   setupKeyboardShortcuts();
@@ -185,6 +270,16 @@ function renderHeader() {
     proBtn.textContent = `🔓 نسخه کامل (${priceText})`;
     proBtn.style.background = '';
   }
+}
+
+function updatePaywallModalPrices() {
+  const c = AppState.course;
+  if (!c) return;
+  const priceStr = `${(c.price_toman || 59000).toLocaleString('fa-IR')} تومان`;
+  const p1 = document.getElementById('paywallPriceShaparak');
+  const p2 = document.getElementById('paywallPriceCard');
+  if (p1) p1.textContent = priceStr;
+  if (p2) p2.textContent = priceStr;
 }
 
 function setupTabSwitching() {
@@ -658,9 +753,142 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
   }
 };
 
+// --- Milestone 3: Multi-Course Catalog Hub & Switching ---
+window.openCatalogModal = function () {
+  window.TMA.triggerHaptic('light');
+  fetchCatalog();
+  fetchCreatorStats();
+  document.getElementById('catalogBackdrop').classList.add('open');
+};
+
+window.closeCatalogModal = function () {
+  document.getElementById('catalogBackdrop').classList.remove('open');
+};
+
+window.setCatalogCategory = function (category, btnEl) {
+  AppState.catalogCategory = category;
+  document.querySelectorAll('.catalog-pills .pill-btn').forEach((b) => b.classList.remove('active'));
+  if (btnEl) btnEl.classList.add('active');
+  renderCatalogCourses();
+};
+
+window.filterCatalogList = function () {
+  const input = document.getElementById('catalogSearchInput');
+  AppState.catalogSearchQuery = (input ? input.value : '').trim().toLowerCase();
+  renderCatalogCourses();
+};
+
+function renderCatalogCourses() {
+  const container = document.getElementById('catalogCoursesContainer');
+  if (!container) return;
+
+  const filtered = AppState.catalog.filter((c) => {
+    // فیلتر بر اساس دسته‌بندی
+    if (AppState.catalogCategory !== 'all' && c.category !== AppState.catalogCategory) {
+      return false;
+    }
+    // فیلتر جستجو
+    if (AppState.catalogSearchQuery) {
+      const q = AppState.catalogSearchQuery;
+      const match =
+        (c.title && c.title.toLowerCase().includes(q)) ||
+        (c.instructor && c.instructor.toLowerCase().includes(q)) ||
+        (c.creator && c.creator.toLowerCase().includes(q)) ||
+        (c.category && c.category.toLowerCase().includes(q));
+      if (!match) return false;
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
+    container.innerHTML = `
+      <div style="text-align:center; padding:30px 10px; color:#94a3b8; font-size:0.84rem;">
+        🔍 جزوه‌ای با این عنوان یافت نشد. می‌توانید با ارسال PDF در ربات، اولین جزوه‌نویس این درس باشید!
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = filtered
+    .map((c) => {
+      const isCurrent = (AppState.course && AppState.course.id === c.id) || AppState.currentCourseSlug === c.slug;
+      const isUnlocked = c.isProUnlocked || (isCurrent && AppState.isProUnlocked);
+      const priceText = isUnlocked ? '✨ نسخه کامل فعال' : `${(c.price_toman || 59000).toLocaleString('fa-IR')} تومان`;
+
+      return `
+        <div class="course-catalog-card ${isCurrent ? 'active-course' : ''}" onclick="switchCourse('${c.slug}')">
+          <div class="catalog-card-category">${c.category || 'دروس پایه'}</div>
+          <div class="catalog-card-title">${c.title}</div>
+          <div class="catalog-card-instructor">${c.instructor || ''} • ${c.creator || ''}</div>
+          <div class="catalog-card-footer">
+            <div class="catalog-card-badges">
+              <span>🗂️ ${c.flashcards_count || 4} فلش‌کارت</span>
+              <span>📝 ${c.questions_count || 4} سوال امتحان</span>
+            </div>
+            <div class="catalog-card-price ${isUnlocked ? 'unlocked-pro' : ''}">${priceText}</div>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+// جابه‌جایی آنی درس بدون بارگذاری مجدد کل صفحه
+window.switchCourse = async function (slug) {
+  if (AppState.currentCourseSlug === slug) {
+    closeCatalogModal();
+    return;
+  }
+
+  window.TMA.triggerHaptic('success');
+  closeCatalogModal();
+
+  // به‌روزرسانی URL بدون ریفرش صفحه
+  const newUrl = `${window.location.pathname}?course=${encodeURIComponent(slug)}`;
+  window.history.pushState(null, '', newUrl);
+
+  await loadCourseData(slug);
+  renderCatalogCourses();
+};
+
+// اشتراک‌گذاری مستقیم لینک درس در گروه‌های تلگرامی
+window.shareCurrentCourse = function () {
+  window.TMA.triggerHaptic('success');
+  const slug = AppState.currentCourseSlug || 'sample_course';
+  const courseTitle = AppState.course?.title || 'جزوه زنده شب امتحان';
+  const shareUrl = `${window.location.origin}${window.location.pathname}?course=${encodeURIComponent(slug)}`;
+  const shareText = `🎓 ${courseTitle}\nفرمول‌نامه کامل، فلش‌کارت لایتنر و شبیه‌ساز سوالات پایانترم با حل هوش مصنوعی:\n${shareUrl}`;
+
+  if (window.navigator?.clipboard?.writeText) {
+    window.navigator.clipboard.writeText(shareUrl).then(() => {
+      alert(`✅ لینک مستقیم «${courseTitle}» در کلیپ‌بورد کپی شد!\nمی‌توانید در گروه‌های کلاسی تلگرام ارسال کنید.`);
+    }).catch(() => {
+      alert(shareText);
+    });
+  } else {
+    alert(shareText);
+  }
+};
+
+// نمایش راهنما و موجودی پنل جزوه‌نویسان
+window.openCreatorInfoModal = function () {
+  window.TMA.triggerHaptic('light');
+  const bal = (AppState.creatorStats.balanceToman || 0).toLocaleString('fa-IR');
+  const sales = (AppState.creatorStats.salesCount || 0).toLocaleString('fa-IR');
+
+  alert(
+    `💰 پنل درآمد جزوه‌نویسان برتر (سهم ۷۰٪):\n\n` +
+    `📊 تعداد فروش پکیج‌های شما: ${sales} پکیج\n` +
+    `💵 موجودی قابل تسویه: ${bal} تومان\n\n` +
+    `✨ چگونه جزوه خود را اضافه کنید؟\n` +
+    `کافی است فایل PDF جزوه دست‌نویس خود را در ربات تلگرام ارسال کنید؛ هوش مصنوعی آن را ظرف چند ثانیه به پکیج تعاملی تبدیل کرده و ۷۰٪ مبلغ هر خرید بلافاصله به کیف پول شما منظور می‌شود!`
+  );
+};
+
 // Paywall Modal
 window.openPaywallModal = function () {
   window.TMA.triggerHaptic('warning');
+  updatePaywallModalPrices();
   document.getElementById('paywallBackdrop').classList.add('open');
 };
 
@@ -668,18 +896,27 @@ window.closePaywallModal = function () {
   document.getElementById('paywallBackdrop').classList.remove('open');
 };
 
-window.simulateUnlockPurchase = function (methodName) {
+window.simulateUnlockPurchase = async function (methodName) {
   window.TMA.triggerHaptic('success');
   AppState.isProUnlocked = true;
   window.TMA.saveProgress(`progress_${AppState.course?.id || 'sample_course'}`, {
     leitnerStatus: AppState.leitnerStatus,
     isProUnlocked: true
   });
+
+  const apiBase = getApiBase();
+  try {
+    // ثبت خرید آزمایشی و اختصاص ۷۰٪ سهم به جزوه‌نویس
+    await fetch(`${apiBase}/api/course?id=${encodeURIComponent(AppState.currentCourseSlug)}&simulate_buy=1`);
+  } catch (_) {}
+
   closePaywallModal();
   renderHeader();
   renderFlashcardView();
   renderExamQuiz();
   renderAiQuotaBadge();
+  fetchCatalog();
+  fetchCreatorStats();
   alert(`✅ پرداخت آزمایشی (${methodName}) تایید شد! تمام فلش‌کارت‌ها، سوالات امتحان و ۱۰۰ پرسش هوش مصنوعی باز شدند.`);
 };
 

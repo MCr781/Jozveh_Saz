@@ -54,7 +54,8 @@ export let DB = {
   purchases: {},        // { "userId_courseId": true }
   userSpamStats: {},    // { userId: { lastReportAt, dailyCount, dayStamp, rejectedStrikes, bonusQuota, usedAiQueries, lastChatAt } }
   pendingReports: {},   // { reportId: { courseId, itemId, userId, claim, proposedFix, learnedRule, status } }
-  reportedItemsLock: {} // { "courseId_itemId": true }
+  reportedItemsLock: {}, // { "courseId_itemId": true }
+  creatorEarnings: {}   // { creator_telegram_id: { balanceToman, salesCount, history: [] } }
 };
 
 if (fs.existsSync(DB_PATH)) {
@@ -64,6 +65,7 @@ if (fs.existsSync(DB_PATH)) {
     if (!DB.userSpamStats) DB.userSpamStats = {};
     if (!DB.pendingReports) DB.pendingReports = {};
     if (!DB.reportedItemsLock) DB.reportedItemsLock = {};
+    if (!DB.creatorEarnings) DB.creatorEarnings = {};
   } catch (_) {}
 }
 
@@ -71,6 +73,96 @@ export function saveDB() {
   const tmp = `${DB_PATH}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(DB, null, 2), 'utf8');
   fs.renameSync(tmp, DB_PATH);
+}
+
+// یافتن امن فایل جزوه بر اساس slug یا id
+export function findCourseFile(identifier) {
+  if (!identifier) return null;
+  const dataDir = path.join(__dirname, '../public/data');
+  if (!fs.existsSync(dataDir)) return null;
+
+  // ۱. بررسی تطابق مستقیم نام فایل slug
+  const directSlug = path.basename(identifier).replace(/\.json$/i, '');
+  const directPath = path.join(dataDir, `${directSlug}.json`);
+  if (fs.existsSync(directPath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(directPath, 'utf8'));
+      return { path: directPath, slug: directSlug, data };
+    } catch (_) {}
+  }
+
+  // ۲. بررسی شناسه در تمام فایل‌های پوشه data
+  const files = fs.readdirSync(dataDir).filter((f) => f.endsWith('.json') && !f.includes('..'));
+  for (const file of files) {
+    const fullPath = path.join(dataDir, file);
+    try {
+      const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+      if (data.id === identifier || path.basename(file, '.json') === identifier) {
+        return { path: fullPath, slug: path.basename(file, '.json'), data };
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+// ثبت خرید و واریز سهم ۷۰ درصدی جزوه‌نویس
+export async function recordCourseSale(buyerUserId, courseSlugOrId) {
+  const found = findCourseFile(courseSlugOrId);
+  const courseId = found?.data?.id || courseSlugOrId;
+  const courseTitle = found?.data?.title || 'پکیج آموزشی شب امتحان';
+  const priceToman = found?.data?.price_toman || 59000;
+  const creatorId = found?.data?.creator_telegram_id || 'creator_demo_1';
+
+  // ۱. ثبت دائم دسترسی برای خریدار
+  DB.purchases[`${buyerUserId}_${courseId}`] = true;
+
+  // ۲. محاسبه سهم ۷۰٪ جزوه‌نویس
+  const creatorShareToman = Math.round(priceToman * 0.7);
+
+  if (!DB.creatorEarnings[creatorId]) {
+    DB.creatorEarnings[creatorId] = {
+      balanceToman: 0,
+      salesCount: 0,
+      history: []
+    };
+  }
+
+  const creatorRecord = DB.creatorEarnings[creatorId];
+  creatorRecord.balanceToman = (creatorRecord.balanceToman || 0) + creatorShareToman;
+  creatorRecord.salesCount = (creatorRecord.salesCount || 0) + 1;
+  creatorRecord.history.push({
+    courseId,
+    courseTitle,
+    priceToman,
+    creatorShareToman,
+    buyerUserId,
+    timestamp: Date.now()
+  });
+
+  saveDB();
+
+  // ۳. ارسال پیام تلگرام برای جزوه‌نویس
+  if (BOT_TOKEN && creatorId && !creatorId.startsWith('creator_demo')) {
+    await notifyTelegram(
+      creatorId,
+      `🎉 <b>فروش جدید ثبت شد! (واریز سهم ۷۰٪ جزوه‌نویس)</b>\n\n` +
+      `📚 جزوه: <b>${courseTitle}</b>\n` +
+      `💰 مبلغ واریز شده: <b>${creatorShareToman.toLocaleString('fa-IR')} تومان</b>\n` +
+      `📊 مجموع موجودی شما: <b>${creatorRecord.balanceToman.toLocaleString('fa-IR')} تومان</b>\n\n` +
+      `✨ برای مشاهده جزئیات درآمد، دستور /income را در ربات بزنید.`
+    );
+  }
+
+  return {
+    ok: true,
+    buyerUserId,
+    courseId,
+    creatorId,
+    priceToman,
+    creatorShareToman,
+    newBalanceToman: creatorRecord.balanceToman
+  };
 }
 
 export function getUserStats(userId) {
@@ -247,13 +339,79 @@ export const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // ۱. API دریافت امن جزوه (با حذف سمت سرورِ محتوای قفل‌شده برای کاربران عادی)
+  // ۱. کاتالوگ چنددرسی امن (Multi-Course Catalog)
+  if (req.method === 'GET' && url.pathname === '/api/courses') {
+    const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+    const userId = auth.valid ? auth.user.id : 'guest';
+
+    const dataDir = path.join(__dirname, '../public/data');
+    if (!fs.existsSync(dataDir)) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, courses: [] }));
+      return;
+    }
+
+    const files = fs.readdirSync(dataDir).filter((f) => f.endsWith('.json') && !f.includes('..'));
+    const catalog = [];
+
+    for (const file of files) {
+      try {
+        const fullPath = path.join(dataDir, file);
+        const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+        const slug = path.basename(file, '.json');
+        const isPurchased = Boolean(DB.purchases[`${userId}_${data.id}`]);
+
+        catalog.push({
+          id: data.id,
+          slug,
+          title: data.title,
+          instructor: data.instructor,
+          creator: data.creator,
+          creator_telegram_id: data.creator_telegram_id || 'creator_default',
+          category: data.category || 'دروس عمومی مهندسی',
+          price_toman: data.price_toman || 59000,
+          flashcards_count: (data.flashcards || []).length,
+          questions_count: (data.exam_questions || []).length,
+          cheat_sheet_count: (data.summary_cheat_sheet || []).length,
+          isProUnlocked: isPurchased
+        });
+      } catch (_) {}
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, courses: catalog }));
+    return;
+  }
+
+  // ۲. آمار درآمد و فروش ۷۰٪ جزوه‌نویس
+  if (req.method === 'GET' && url.pathname === '/api/creator-stats') {
+    const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+    const userId = auth.valid ? String(auth.user.id) : 'guest';
+    const creatorId = url.searchParams.get('creator_id') || userId;
+
+    const stats = DB.creatorEarnings[creatorId] || DB.creatorEarnings[userId] || DB.creatorEarnings['creator_demo_1'] || {
+      balanceToman: 0,
+      salesCount: 0,
+      history: []
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      ok: true,
+      creatorId,
+      balanceToman: stats.balanceToman || 0,
+      salesCount: stats.salesCount || 0,
+      history: stats.history || []
+    }));
+    return;
+  }
+
+  // ۳. API دریافت امن جزوه (با حذف سمت سرورِ محتوای قفل‌شده برای کاربران عادی)
   if (req.method === 'GET' && url.pathname === '/api/course') {
     const courseIdParam = url.searchParams.get('id') || 'sample_course';
-    const courseFile = path.basename(courseIdParam) + '.json';
-    const fullPath = path.join(__dirname, '../public/data', courseFile);
+    const found = findCourseFile(courseIdParam);
 
-    if (!fs.existsSync(fullPath)) {
+    if (!found) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, message: 'جزوه مورد نظر یافت نشد.' }));
       return;
@@ -261,7 +419,7 @@ export const server = http.createServer(async (req, res) => {
 
     const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
     const userId = auth.valid ? auth.user.id : 'guest';
-    const rawCourse = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+    const rawCourse = found.data;
 
     const isPurchased = Boolean(DB.purchases[`${userId}_${rawCourse.id}`]);
     const st = getUserStats(userId);
@@ -273,6 +431,7 @@ export const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       ok: true,
+      slug: found.slug,
       isProUnlocked: isPurchased,
       remainingAiQuota,
       course: safePayload
@@ -280,7 +439,7 @@ export const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ۲. API پرسش و حل سوال امتحانی با هوش مصنوعی (همراه با Rate-Limit و شمارش سهمیه سرور)
+  // ۴. API پرسش و حل سوال امتحانی با هوش مصنوعی (همراه با Rate-Limit و شمارش سهمیه سرور)
   if (req.method === 'POST' && url.pathname === '/api/ask-tutor') {
     let body = '';
     req.on('data', (chunk) => { if (body.length < 8192) body += chunk; });
@@ -331,7 +490,7 @@ export const server = http.createServer(async (req, res) => {
         let replyText = '';
 
         if (!GEMINI_KEYS.length) {
-          replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند و فرمول $$\\Delta G = \\Delta H - T\\Delta S$$ ملاک تعادل فازی است.`;
+          replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند و فرمول‌های پایه ملاک محاسبات نهایی هستند.`;
         } else {
           try {
             const tutorPrompt = `
@@ -347,7 +506,7 @@ export const server = http.createServer(async (req, res) => {
             });
           } catch (err) {
             console.error('Gemini ask-tutor error:', err.message);
-            replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند و فرمول $$\\Delta G = \\Delta H - T\\Delta S$$ ملاک تعادل فازی است.`;
+            replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که مقادیر در شرایط استاندارد سنجیده می‌شوند.`;
           }
         }
 
@@ -365,7 +524,7 @@ export const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ۳. API ثبت گزارش خطای هوشمند با سپر ضداسپم و داور AI
+  // ۵. API ثبت گزارش خطای هوشمند با سپر ضداسپم و داور AI
   if (req.method === 'POST' && url.pathname === '/api/report-issue') {
     let body = '';
     req.on('data', (chunk) => { if (body.length < 4096) body += chunk; });
