@@ -1,3 +1,4 @@
+import './env.js';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
@@ -8,40 +9,23 @@ import { startTelegramBotPolling } from './bot.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Native lightweight .env parser (no external dependency)
-function loadEnvFile() {
-  const envPath = path.join(__dirname, '../.env');
-  if (!fs.existsSync(envPath)) return;
-  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const idx = trimmed.indexOf('=');
-    if (idx === -1) continue;
-    const key = trimmed.slice(0, idx).trim();
-    let val = trimmed.slice(idx + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    if (process.env[key] === undefined) process.env[key] = val;
-  }
-}
-loadEnvFile();
+export { loadEnvFile, getEnv } from './env.js';
 
-const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN || '';
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '';
-const MERCHANT_ID = process.env.MERCHANT_ID || '';
-const GEMINI_KEYS = [
-  process.env.GEMINI_API_KEY_1 || '',
-  process.env.GEMINI_API_KEY_2 || '',
-  process.env.GEMINI_API_KEY_3 || ''
-].filter((k) => k && !k.startsWith('YOUR_'));
+export const PORT = Number(process.env.PORT?.trim()) || 3000;
+
+export function getGeminiKeys() {
+  return [
+    process.env.GEMINI_API_KEY_1?.trim() || '',
+    process.env.GEMINI_API_KEY_2?.trim() || '',
+    process.env.GEMINI_API_KEY_3?.trim() || ''
+  ].filter((k) => k && !k.startsWith('YOUR_'));
+}
 
 let keyIdx = 0;
 export function getNextGeminiKey() {
-  if (!GEMINI_KEYS.length) return null;
-  const apiKey = GEMINI_KEYS[keyIdx % GEMINI_KEYS.length];
+  const keys = getGeminiKeys();
+  if (!keys.length) return null;
+  const apiKey = keys[keyIdx % keys.length];
   keyIdx++;
   return apiKey;
 }
@@ -174,7 +158,8 @@ export async function recordCourseSale(buyerUserId, courseSlugOrId) {
   saveDB();
 
   // ۳. ارسال پیام تلگرام برای جزوه‌نویس
-  if (BOT_TOKEN && creatorId && !creatorId.startsWith('creator_demo')) {
+  const botToken = process.env.BOT_TOKEN?.trim();
+  if (botToken && creatorId && !creatorId.startsWith('creator_demo')) {
     await notifyTelegram(
       creatorId,
       `🎉 <b>فروش جدید ثبت شد! (واریز سهم ۷۰٪ جزوه‌نویس)</b>\n\n` +
@@ -219,7 +204,8 @@ export function getUserStats(userId) {
 
 // ۱. اعتبارسنجی رمزنگاری‌شده امضای تلگرام (HMAC-SHA256)
 export function verifyTelegramInitData(initDataRaw) {
-  if (!BOT_TOKEN) return { valid: true, user: { id: 'demo_user_981024', username: 'UT_Student_Demo' } };
+  const botToken = process.env.BOT_TOKEN?.trim();
+  if (!botToken) return { valid: true, user: { id: 'demo_user_981024', username: 'UT_Student_Demo' } };
   if (!initDataRaw) return { valid: false };
 
   try {
@@ -232,7 +218,7 @@ export function verifyTelegramInitData(initDataRaw) {
       .map(([k, v]) => `${k}=${v}`)
       .join('\n');
 
-    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
     const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
     if (calculatedHash !== hash) return { valid: false };
@@ -267,7 +253,7 @@ export function checkSpamShield(userId, itemKey) {
 
 // ۳. داور هوش مصنوعی (AI Fact-Checker) با استفاده از Native fetch
 async function verifyReportWithAIJudge({ originalText, userClaim, sourcePage }) {
-  if (!GEMINI_KEYS.length) {
+  if (!getGeminiKeys().length) {
     return {
       is_valid: true,
       confidence: 95,
@@ -323,16 +309,26 @@ async function verifyReportWithAIJudge({ originalText, userClaim, sourcePage }) 
 }
 
 export async function notifyTelegram(chatId, text, inlineKeyboard = null) {
-  if (!BOT_TOKEN || !chatId) return;
+  const botToken = process.env.BOT_TOKEN?.trim();
+  if (!botToken || !chatId) return null;
   try {
     const payload = { chat_id: chatId, text, parse_mode: 'HTML' };
     if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-  } catch (_) {}
+    const data = await res.json().catch(() => null);
+    if (!res.ok || (data && !data.ok)) {
+      console.error(`❌ Telegram notifyTelegram error (${res.status}):`, data || res.statusText);
+      return data || { ok: false, status: res.status };
+    }
+    return data;
+  } catch (err) {
+    console.error('❌ Telegram notifyTelegram fetch error:', err.message || err);
+    return null;
+  }
 }
 
 // سانسور سمت سرور برای کارت‌های قفل‌شده (ضد هک از طریق Network Tab)
@@ -652,7 +648,7 @@ export const server = http.createServer(async (req, res) => {
 
         let replyText = '';
 
-        if (!GEMINI_KEYS.length) {
+        if (!getGeminiKeys().length) {
           if (imageBase64) {
             replyText = `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید؛ واحدها را به SI تبدیل نمایید.`;
           } else {
@@ -754,19 +750,22 @@ export const server = http.createServer(async (req, res) => {
         };
         saveDB();
 
-        await notifyTelegram(
-          ADMIN_CHAT_ID,
-          `🛠️ <b>گزارش خطای تاییدشده توسط AI (${verdict.confidence}%)</b>\n\n` +
-          `👤 کاربر: <code>${auth.user.id}</code>\n` +
-          `📍 آیتم: <code>${itemKey}</code> (صفحه ${sourcePage})\n` +
-          `💬 گزارش دانشجو: ${cleanClaim}\n\n` +
-          `✨ <b>اصلاح پیشنهادی:</b>\n${verdict.corrected_text}\n\n` +
-          `🧠 <b>قانون جدید برای حافظه:</b>\n${verdict.general_rule_for_memory}`,
-          [[
-            { text: '✅ اعمال در جزوه + جایزه', callback_data: `approve_${reportId}` },
-            { text: '🚫 رد و جریمه اسپمر', callback_data: `reject_${reportId}` }
-          ]]
-        );
+        const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
+        if (adminChatId) {
+          await notifyTelegram(
+            adminChatId,
+            `🛠️ <b>گزارش خطای تاییدشده توسط AI (${verdict.confidence}%)</b>\n\n` +
+            `👤 کاربر: <code>${auth.user.id}</code>\n` +
+            `📍 آیتم: <code>${itemKey}</code> (صفحه ${sourcePage})\n` +
+            `💬 گزارش دانشجو: ${cleanClaim}\n\n` +
+            `✨ <b>اصلاح پیشنهادی:</b>\n${verdict.corrected_text}\n\n` +
+            `🧠 <b>قانون جدید برای حافظه:</b>\n${verdict.general_rule_for_memory}`,
+            [[
+              { text: '✅ اعمال در جزوه + جایزه', callback_data: `approve_${reportId}` },
+              { text: '🚫 رد و جریمه اسپمر', callback_data: `reject_${reportId}` }
+            ]]
+          );
+        }
 
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
@@ -800,8 +799,9 @@ export const server = http.createServer(async (req, res) => {
         const price = amount || found?.data?.price_toman || 59000;
         const courseTitle = found?.data?.title || 'پکیج شب امتحان';
 
+        const merchantId = process.env.MERCHANT_ID?.trim() || '';
         function isDemoMerchant() {
-          const m = MERCHANT_ID || '';
+          const m = merchantId;
           return !m || m.startsWith('YOUR_') || m.toLowerCase() === 'demo' || m === 'demo';
         }
 
@@ -812,13 +812,13 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const callbackBase = process.env.PAYMENT_CALLBACK_BASE || process.env.WEBAPP_URL || `http://localhost:${PORT}`;
+        const callbackBase = process.env.PAYMENT_CALLBACK_BASE?.trim() || process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`;
         const callbackUrl = `${callbackBase}/api/payment/verify?courseId=${encodeURIComponent(cid)}`;
         try {
           const zRes = await fetch('https://api.zarinpal.com/pg/v4/payment/request.json', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ merchant_id: MERCHANT_ID, amount: price * 10, callback_url: callbackUrl, description: `خرید ${courseTitle}` })
+            body: JSON.stringify({ merchant_id: merchantId, amount: price * 10, callback_url: callbackUrl, description: `خرید ${courseTitle}` })
           });
           const zData = await zRes.json().catch(() => null);
           if (zData?.data?.code === 100 && zData?.data?.authority) {
@@ -855,8 +855,9 @@ export const server = http.createServer(async (req, res) => {
     const courseId = pending?.courseId || courseIdParam || 'sample_course';
     const amount = pending?.amount || 59000;
 
+    const merchantId = process.env.MERCHANT_ID?.trim() || '';
     function isDemoMerchant() {
-      const m = MERCHANT_ID || '';
+      const m = merchantId;
       return !m || m.startsWith('YOUR_') || m.toLowerCase() === 'demo' || m === 'demo';
     }
 
@@ -867,12 +868,12 @@ export const server = http.createServer(async (req, res) => {
     }
 
     let ok = isDemoMerchant();
-    if (!ok && MERCHANT_ID && authority) {
+    if (!ok && merchantId && authority) {
       try {
         const vRes = await fetch('https://api.zarinpal.com/pg/v4/payment/verify.json', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ merchant_id: MERCHANT_ID, amount: amount * 10, authority })
+          body: JSON.stringify({ merchant_id: merchantId, amount: amount * 10, authority })
         });
         const vData = await vRes.json().catch(() => null);
         if (vData?.data?.code === 100 || vData?.data?.code === 101) ok = true;
@@ -889,7 +890,7 @@ export const server = http.createServer(async (req, res) => {
         delete DB.pendingPayments[authority];
         saveDB();
       }
-      const redirect = `${process.env.WEBAPP_URL || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
+      const redirect = `${process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
       res.writeHead(302, { Location: redirect });
       res.end();
     } else {
@@ -943,14 +944,17 @@ export const server = http.createServer(async (req, res) => {
         };
         saveDB();
 
-        await notifyTelegram(
-          ADMIN_CHAT_ID,
-          `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${targetCreator}\n🏦 ${cleanSheba}\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
-          [[
-            { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
-            { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
-          ]]
-        );
+        const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
+        if (adminChatId) {
+          await notifyTelegram(
+            adminChatId,
+            `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${targetCreator}\n🏦 ${cleanSheba}\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
+            [[
+              { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
+              { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
+            ]]
+          );
+        }
 
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: true, payoutId, message: 'درخواست تسویه ثبت شد و برای ادمین ارسال گردید.' }));
@@ -1010,7 +1014,8 @@ const isDirectRun = Boolean(process.argv[1]) && path.resolve(process.argv[1]) ==
 if (isDirectRun) {
   server.listen(PORT, () => {
     console.log(`🚀 سرور جزوه زنده، درگاه امن جزوات و سپر ضداسپم روی پورت http://localhost:${PORT} فعال شد!`);
-    if (BOT_TOKEN) {
+    const botToken = process.env.BOT_TOKEN?.trim();
+    if (botToken) {
       startTelegramBotPolling();
     } else {
       console.log('ℹ️ متغیر BOT_TOKEN تنظیم نشده است؛ ربات تلگرام در حالت آماده به کار (خاموش) قرار دارد.');

@@ -1,3 +1,4 @@
+import './env.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -7,15 +8,15 @@ import { generateCoursePackage } from '../factory/generate.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// خواندن تنبل متغیرهای محیطی؛ چون server.js فایل .env را بعد از import این ماژول بارگذاری می‌کند.
+// خواندن تنبل متغیرهای محیطی با پاکسازی کامل کاراکترهای \r و فضای خالی
 function getBotToken() {
-  return process.env.BOT_TOKEN || '';
+  return process.env.BOT_TOKEN?.trim() || '';
 }
 function getAdminChatId() {
-  return String(process.env.ADMIN_CHAT_ID || '');
+  return String(process.env.ADMIN_CHAT_ID?.trim() || '');
 }
 function getWebappUrl() {
-  const base = process.env.WEBAPP_URL || `http://localhost:${process.env.PORT || 3000}`;
+  const base = process.env.WEBAPP_URL?.trim() || `http://localhost:${process.env.PORT?.trim() || 3000}`;
   return base.replace(/\/+$/, '');
 }
 function escapeHtml(text) {
@@ -43,25 +44,41 @@ function getReviewReminderTickMs() {
 let lastUpdateId = 0;
 let isPolling = false;
 
-async function tgApi(method, bodyObj) {
-  const botToken = getBotToken();
-  if (!botToken) return { ok: false };
-  const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(bodyObj)
-  });
-  return res.json();
+export async function tgApi(method, bodyObj = {}) {
+  const botToken = process.env.BOT_TOKEN?.trim();
+  if (!botToken) {
+    console.warn(`⚠️ Telegram tgApi('${method}') skipped: BOT_TOKEN is empty.`);
+    return { ok: false, description: 'BOT_TOKEN is empty' };
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj)
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || (data && !data.ok)) {
+      console.error(`❌ Telegram tgApi('${method}') failed (${res.status}):`, data || res.statusText);
+      return data || { ok: false, error_code: res.status, description: res.statusText };
+    }
+    return data;
+  } catch (err) {
+    console.error(`❌ Telegram tgApi('${method}') network error:`, err.message || err);
+    return { ok: false, description: err.message };
+  }
 }
 
 async function downloadTelegramFile(fileId, destPath) {
-  const botToken = getBotToken();
+  const botToken = process.env.BOT_TOKEN?.trim() || getBotToken();
   const info = await tgApi('getFile', { file_id: fileId });
   if (!info.ok || !info.result?.file_path) {
     throw new Error('دریافت آدرس فایل از تلگرام ناموفق بود.');
   }
   const filePath = info.result.file_path;
   const fileRes = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`);
+  if (!fileRes.ok) {
+    throw new Error(`دانلود فایل از تلگرام با خطا مواجه شد (${fileRes.status})`);
+  }
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   fs.writeFileSync(destPath, buffer);
 }
@@ -138,7 +155,7 @@ export function getPendingReviewCourses(userId) {
 
 // متن و دکمه‌های شیشه‌ای یادآور مرور (مشترک بین دستور /review و زمان‌بند شبانه)
 export function buildReviewReminder(userId, courses, { manual = false } = {}) {
-  const base = getWebappUrl();
+  const base = process.env.WEBAPP_URL?.trim()?.replace(/\/+$/, '') || getWebappUrl();
   const topCourses = courses.slice(0, 3);
   const totalPending = courses.reduce((sum, c) => sum + c.reviewCount, 0);
 
@@ -238,6 +255,9 @@ export function startReviewReminderScheduler() {
 
 
 async function handleUpdate(update) {
+  const webappUrl = process.env.WEBAPP_URL?.trim()?.replace(/\/+$/, '') || getWebappUrl();
+  const adminChatId = process.env.ADMIN_CHAT_ID?.trim() || getAdminChatId();
+
   // ۱. مدیریت دکمه‌های شیشه‌ای ادمین (تایید خطا + تایید پرداخت کارت‌به‌کارت با واریز سهم ۷۰٪)
   if (update.callback_query) {
     const cb = update.callback_query;
@@ -254,7 +274,7 @@ async function handleUpdate(update) {
           fromId,
           '✅ <b>در حال حاضر هیچ کارتی در صف مرور نداری!</b>\n\n' +
           'در تب «فلش‌کارت» هر کارتی را که با دکمهٔ «🔄 مرور مجدد در شب امتحان» علامت بزنی، همین‌جا ثبت می‌شود.',
-          [[{ text: '🗂️ ورود به فلش‌کارت‌ها', web_app: { url: `${getWebappUrl()}/` } }]]
+          [[{ text: '🗂️ ورود به فلش‌کارت‌ها', web_app: { url: `${webappUrl}/` } }]]
         );
         return;
       }
@@ -264,7 +284,7 @@ async function handleUpdate(update) {
       return;
     }
 
-    if (fromId !== getAdminChatId()) return;
+    if (fromId !== adminChatId) return;
 
     // الف) تایید گزارش خطای علمی و ارتقای حافظه مدل
     if (data.startsWith('approve_rep_')) {
@@ -324,7 +344,7 @@ async function handleUpdate(update) {
       await notifyTelegram(
         targetUserId,
         '✅ <b>پرداخت شما تایید شد و قفل کامل پکیج باز گردید!</b>\nهم‌اکنون می‌توانید وارد جزوه زنده شوید و به تمام فلش‌کارت‌ها، سوالات پایانترم و ۱۰۰ پرسش هوش مصنوعی دسترسی داشته باشید.',
-        [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${getWebappUrl()}/?course=${finalCourseId}` } }]]
+        [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${webappUrl}/?course=${finalCourseId}` } }]]
       );
     }
     // د) تایید تسویه حساب جزوه‌نویس (پرداخت سهم ۷۰٪)
@@ -362,6 +382,10 @@ async function handleUpdate(update) {
   if (!msg) return;
   const chatId = String(msg.chat.id);
 
+  if (msg.text !== undefined && msg.text !== null) {
+    console.log(`📩 Received from ${chatId}: ${msg.text}`);
+  }
+
   // ۲. دستور /start برای دانشجویان
   if (msg.text && msg.text.startsWith('/start')) {
     await notifyTelegram(
@@ -375,7 +399,7 @@ async function handleUpdate(update) {
       '🔄 مرور کارت‌های ضعیف لایتنر با دستور /review\n\n' +
       '👇 برای شروع روی دکمه زیر بزنید یا اگر رسید کارت‌به‌کارت دارید، عکس آن را همین‌جا بفرستید:',
       [
-        [{ text: '🎓 ورود به جزوه زنده (کاتالوگ دروس)', web_app: { url: `${getWebappUrl()}/` } }],
+        [{ text: '🎓 ورود به جزوه زنده (کاتالوگ دروس)', web_app: { url: `${webappUrl}/` } }],
         [{ text: '🔄 مرور کارت‌های ضعیف (/review)', callback_data: 'cmd_review' }],
         [{ text: '💰 داشبورد درآمد جزوه‌نویس (/income)', callback_data: 'cmd_income' }]
       ]
@@ -396,7 +420,7 @@ async function handleUpdate(update) {
       `📊 تعداد کل فروش: <b>${salesStr} پکیج</b>\n` +
       `💵 موجودی قابل تسویه: <b>${balanceStr} تومان</b>\n\n` +
       `💡 <i>تسویه حساب‌ها هر پنج‌شنبه به شماره شبای ثبت‌شده شما واریز می‌شود. برای ثبت جزوه جدید، فایل PDF خود را همین‌جا ارسال کنید.</i>`,
-      [[{ text: '📚 باز کردن کاتالوگ جزوات', web_app: { url: `${getWebappUrl()}/` } }]]
+      [[{ text: '📚 باز کردن کاتالوگ جزوات', web_app: { url: `${webappUrl}/` } }]]
     );
     return;
   }
@@ -410,7 +434,7 @@ async function handleUpdate(update) {
         chatId,
         '✅ <b>در حال حاضر هیچ کارتی در صف مرور نداری!</b>\n\n' +
         'هر کارتی را که در تب «فلش‌کارت» با دکمهٔ «🔄 مرور مجدد در شب امتحان» علامت بزنی، همین‌جا ثبت می‌شود و قبل از امتحان یادآوری می‌گیری.',
-        [[{ text: '🗂️ ورود به فلش‌کارت‌ها', web_app: { url: `${getWebappUrl()}/` } }]]
+        [[{ text: '🗂️ ورود به فلش‌کارت‌ها', web_app: { url: `${webappUrl}/` } }]]
       );
       return;
     }
@@ -442,7 +466,7 @@ async function handleUpdate(update) {
       DB.payoutRequests[payoutId] = { creatorId: chatId, sheba, amount: balance, status: 'pending', createdAt: Date.now() };
       saveDB();
 
-      await notifyTelegram(getAdminChatId(), `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${chatId}\n🏦 ${sheba}\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
+      await notifyTelegram(adminChatId, `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${chatId}\n🏦 ${sheba}\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
         { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
         { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
       ]]);
@@ -465,7 +489,7 @@ async function handleUpdate(update) {
 
 
   // ۴. اگر ادمین فایل PDF جزوه بفرستد <- تبدیل خودکار به پکیج جزوه زنده!
-  if (chatId === getAdminChatId() && msg.document) {
+  if (chatId === adminChatId && msg.document) {
     const uploadsDir = path.join(__dirname, 'uploads');
     fs.mkdirSync(uploadsDir, { recursive: true });
     const localInput = path.join(uploadsDir, msg.document.file_name || `note_${Date.now()}.pdf`);
@@ -488,7 +512,7 @@ async function handleUpdate(update) {
       await notifyTelegram(
         chatId,
         `✅ <b>پکیج جزوه زنده بدون دخالت دست ساخته شد!</b>\n🆔 شناسه: <code>${courseSlug}</code>`,
-        [[{ text: '👁️ مشاهده جزوه زنده جدید', web_app: { url: `${getWebappUrl()}/?course=${courseSlug}` } }]]
+        [[{ text: '👁️ مشاهده جزوه زنده جدید', web_app: { url: `${webappUrl}/?course=${courseSlug}` } }]]
       );
     } catch (err) {
       await notifyTelegram(chatId, `❌ خطا در ساخت خودکار جزوه: ${err.message}`);
@@ -497,10 +521,10 @@ async function handleUpdate(update) {
   }
 
   // ۵. اگر دانشجو عکس رسید کارت‌به‌کارت بفرستد <- ارسال برای ادمین با دکمه تایید ۱ کلیکی
-  if (msg.photo && chatId !== getAdminChatId()) {
+  if (msg.photo && chatId !== adminChatId) {
     const bestPhoto = msg.photo[msg.photo.length - 1].file_id;
     await tgApi('sendPhoto', {
-      chat_id: getAdminChatId(),
+      chat_id: adminChatId,
       photo: bestPhoto,
       caption: `💳 <b>رسید کارت‌به‌کارت جدید</b>\n👤 دانشجو: <code>${chatId}</code> (@${msg.from.username || 'بدون_نام_کاربری'})`,
       parse_mode: 'HTML',
@@ -515,26 +539,38 @@ async function handleUpdate(update) {
 }
 
 export async function startTelegramBotPolling() {
-  if (!getBotToken()) {
+  const botToken = process.env.BOT_TOKEN?.trim() || getBotToken();
+  if (!botToken) {
     console.log('ℹ️ متغیر BOT_TOKEN تنظیم نشده است؛ ربات تلگرام در حالت آماده به کار (خاموش) قرار دارد.');
     return;
   }
   if (isPolling) return;
-  isPolling = true;
 
+  const me = await tgApi('getMe', {});
+  if (me && me.ok && me.result?.username) {
+    console.log(`✅ Connected to Telegram Bot: @${me.result.username}`);
+  } else {
+    console.error(`❌ Failed to connect to Telegram Bot: error_code: ${me?.error_code || 'N/A'}, description: ${me?.description || 'Unknown error'}`);
+    return;
+  }
+
+  isPolling = true;
   console.log('🤖 ربات تلگرام جزوه زنده (Long-Polling) فعال شد!');
   startReviewReminderScheduler();
 
   while (isPolling) {
     try {
       const data = await tgApi('getUpdates', { offset: lastUpdateId + 1, timeout: 25 });
-      if (data.ok && Array.isArray(data.result)) {
+      if (data && data.ok && Array.isArray(data.result)) {
         for (const upd of data.result) {
           lastUpdateId = upd.update_id;
           await handleUpdate(upd);
         }
+      } else if (!data || !data.ok) {
+        await new Promise((r) => setTimeout(r, 3000));
       }
-    } catch (_) {
+    } catch (err) {
+      console.error('❌ Error in telegram polling loop:', err.message || err);
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
