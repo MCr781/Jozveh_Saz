@@ -70,7 +70,8 @@ export async function callGeminiRestServer({ contents, generationConfig, model =
   return text;
 }
 
-export const DB_PATH = path.join(__dirname, 'state_db.json');
+// امکان تزریق مسیر دیتابیس برای تست‌های ایزوله (STATE_DB_PATH)؛ در تولید همان state_db.json است.
+export const DB_PATH = path.resolve(process.env.STATE_DB_PATH || path.join(__dirname, 'state_db.json'));
 export let DB = {
   purchases: {},        // { "userId_courseId": true }
   userSpamStats: {},    // { userId: { lastReportAt, dailyCount, dayStamp, rejectedStrikes, bonusQuota, usedAiQueries, lastChatAt } }
@@ -99,6 +100,7 @@ if (fs.existsSync(DB_PATH)) {
 }
 
 export function saveDB() {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
   const tmp = `${DB_PATH}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(DB, null, 2), 'utf8');
   fs.renameSync(tmp, DB_PATH);
@@ -361,9 +363,14 @@ function stripLockedContentForFreeUser(courseObj) {
   return clone;
 }
 
+const IMMUTABLE_CACHE_CONTROL = 'public, max-age=604800, immutable';
+
 export const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Telegram-Init-Data');
+  // هدرهای امنیتی پایه (سازگار با WebView تلگرام)
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'ALLOWALL');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -985,7 +992,14 @@ export const server = http.createServer(async (req, res) => {
     '.woff2': 'font/woff2'
   };
 
-  res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' });
+  const headers = { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' };
+  const baseName = path.basename(filePath).toLowerCase();
+  // فونت وزیرمتن و فایل‌های KaTeX برای یک هفته به صورت immutable کش شوند.
+  if (ext === '.woff2' || baseName.startsWith('katex.min.')) {
+    headers['Cache-Control'] = IMMUTABLE_CACHE_CONTROL;
+  }
+
+  res.writeHead(200, headers);
   fs.createReadStream(filePath).pipe(res);
 });
 
