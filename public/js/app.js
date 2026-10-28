@@ -131,7 +131,10 @@ async function loadCourseData(courseSlug) {
   }
 
   AppState.currentCardIndex = 0;
-  window.TMA.loadProgress(`progress_${AppState.course.id}`, (saved) => {
+  const loadedCourseId = AppState.course.id;
+  window.TMA.loadProgress(`progress_${loadedCourseId}`, (saved) => {
+    // اگر کاربر حین بارگذاری درس را عوض کرده باشد، نتیجهٔ قدیمی نادیده گرفته می‌شود
+    if (!AppState.course || AppState.course.id !== loadedCourseId) return;
     AppState.leitnerStatus = saved.leitnerStatus || {};
     if (saved.isProUnlocked) AppState.isProUnlocked = true;
     renderHeader();
@@ -140,8 +143,45 @@ async function loadCourseData(courseSlug) {
     renderExamQuiz();
     renderAiQuotaBadge();
     updatePaywallModalPrices();
+    // همگام‌سازی اولیه وضعیت مرور با سرور تا یادآور شبانه تلگرام دقیق باشد
+    syncStudyProgress();
   });
 }
+
+// همگام‌سازی تعداد کارت‌های نیازمند مرور با سرور (برای یادآور لایتنر در ربات)
+async function syncStudyProgress() {
+  if (!AppState.course) return;
+
+  const cards = AppState.course.flashcards || [];
+  const validIds = new Set(cards.map((card) => card.id));
+  const entries = Object.entries(AppState.leitnerStatus).filter(([id]) => validIds.has(id));
+  const pendingReviewIds = entries.filter(([, status]) => status === 'review').map(([id]) => id);
+  const knownCount = entries.filter(([, status]) => status === 'known').length;
+
+  const payload = {
+    courseId: AppState.currentCourseSlug || AppState.course.id || 'sample_course',
+    courseTitle: AppState.course.title || '',
+    reviewCount: pendingReviewIds.length,
+    knownCount,
+    totalCards: cards.length,
+    pendingReviewIds: pendingReviewIds.slice(0, 200)
+  };
+
+  try {
+    await fetch(`${getApiBase()}/api/sync-progress`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Init-Data': window.TMA.tg?.initData || ''
+      },
+      body: JSON.stringify(payload),
+      keepalive: true
+    });
+  } catch (_) {
+    // آفلاین یا Live Server: پیشرفت در localStorage/CloudStorage باقی می‌ماند
+  }
+}
+
 
 // دریافت کاتالوگ تمام دروس موجود
 async function fetchCatalog() {
@@ -224,6 +264,33 @@ async function initStudyPlayer() {
 
   setupTabSwitching();
   setupKeyboardShortcuts();
+
+  // Deep Link ربات: /?course=...&review=1 → مستقیم تب فلش‌کارت و فیلتر کارت‌های ضعیف
+  if (urlParams.get('review') === '1' || urlParams.get('filter') === 'review') {
+    activateReviewMode();
+  }
+}
+
+function activateReviewMode() {
+  AppState.cardFilter = 'review';
+  AppState.currentCardIndex = 0;
+
+  const flashTabBtn = document.querySelector('.tab-btn[data-tab="tabFlashcards"]');
+  if (flashTabBtn) {
+    flashTabBtn.click();
+  } else {
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.getAttribute('data-tab') === 'tabFlashcards');
+    });
+    document.querySelectorAll('.view-section').forEach((view) => {
+      view.classList.toggle('active', view.id === 'tabFlashcards');
+    });
+  }
+
+  const filterPills = document.querySelectorAll('#tabFlashcards .filter-pills .pill-btn');
+  filterPills.forEach((pill, index) => pill.classList.toggle('active', index === 1));
+
+  renderFlashcardView();
 }
 
 function setupKeyboardShortcuts() {
@@ -457,6 +524,9 @@ window.markCardStatus = function (status) {
     leitnerStatus: AppState.leitnerStatus,
     isProUnlocked: AppState.isProUnlocked
   });
+
+  // هر بار «مرور مجدد» یا «بلدم» زده شد، شمارش کارت‌های ضعیف به سرور سینک می‌شود
+  syncStudyProgress();
 
   renderHeader();
   nextFlashcard(1);

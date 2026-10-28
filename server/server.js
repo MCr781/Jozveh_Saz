@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename);
 function loadEnvFile() {
   const envPath = path.join(__dirname, '../.env');
   if (!fs.existsSync(envPath)) return;
-  const lines = fs.readFileSync(envPath, 'utf8').split(/\\r?\\n/);
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
@@ -468,7 +468,134 @@ export const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ۴. API پرسش و حل سوال امتحانی با هوش مصنوعی (همراه با Rate-Limit و شمارش سهمیه سرور)
+  // ۴. همگام‌سازی پیشرفت مرور لایتنر (Leitner Spaced Repetition Sync)
+  if (req.method === 'POST' && url.pathname === '/api/sync-progress') {
+    let body = '';
+    req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
+    req.on('end', () => {
+      try {
+        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        if (!auth.valid) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+
+        const userId = String(auth.user?.id || '').trim();
+        if (!userId) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'شناسه کاربر تلگرام نامعتبر است.' }));
+          return;
+        }
+
+        let payload;
+        try {
+          payload = JSON.parse(body || '{}');
+        } catch (_) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'بدنهٔ درخواست همگام‌سازی معتبر نیست.' }));
+          return;
+        }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'ساختار دادهٔ همگام‌سازی معتبر نیست.' }));
+          return;
+        }
+
+        // شناسه درس فقط با کاراکترهای امن پذیرفته می‌شود (جلوگیری از Path Traversal)
+        const rawCourseId = String(payload.courseId || 'sample_course').trim().slice(0, 120);
+        const courseId = /^[A-Za-z0-9_-]{1,120}$/.test(rawCourseId) ? rawCourseId : 'sample_course';
+
+        const toCount = (value, max = 2000) => {
+          const n = Number(value);
+          if (!Number.isFinite(n)) return 0;
+          return Math.max(0, Math.min(max, Math.floor(n)));
+        };
+
+        const reviewCount = toCount(payload.reviewCount);
+        const knownCount = toCount(payload.knownCount);
+        const totalCards = toCount(payload.totalCards, 5000);
+        const pendingReviewIds = Array.isArray(payload.pendingReviewIds)
+          ? payload.pendingReviewIds
+              .map((id) => String(id).trim().slice(0, 80))
+              .filter(Boolean)
+              .slice(0, 500)
+          : [];
+
+        const found = findCourseFile(courseId);
+        const now = Date.now();
+        const prev = DB.userStudyProgress[userId] || {};
+        const courses = { ...(prev.courses || {}) };
+        const canonicalCourseId = found?.data?.id || courseId;
+        const canonicalKey = found?.slug || courseId;
+
+        // اگر همین درس قبلاً با شناسه یا slug دیگری ثبت شده، رکورد تکراری حذف شود
+        if (found) {
+          for (const [key, rec] of Object.entries(courses)) {
+            if (rec?.courseId === canonicalCourseId && key !== canonicalKey) {
+              delete courses[key];
+            }
+          }
+        }
+
+        courses[canonicalKey] = {
+          courseId: canonicalCourseId,
+          slug: found?.slug || courseId,
+          courseTitle: found?.data?.title || String(payload.courseTitle || '').slice(0, 200) || courseId,
+          reviewCount,
+          knownCount,
+          totalCards,
+          pendingReviewIds,
+          lastSyncAt: now
+        };
+
+        // نگه‌داشتن حداکثر ۲۵ درس اخیر برای جلوگیری از رشد بی‌رویه دیتابیس
+        const recentCourses = Object.fromEntries(
+          Object.entries(courses)
+            .sort((a, b) => (b[1].lastSyncAt || 0) - (a[1].lastSyncAt || 0))
+            .slice(0, 25)
+        );
+
+        const totals = Object.values(recentCourses).reduce(
+          (acc, rec) => {
+            acc.reviewCount += toCount(rec.reviewCount);
+            acc.knownCount += toCount(rec.knownCount);
+            acc.totalCards += toCount(rec.totalCards, 5000);
+            return acc;
+          },
+          { reviewCount: 0, knownCount: 0, totalCards: 0 }
+        );
+
+        DB.userStudyProgress[userId] = {
+          ...prev,
+          reviewCount: totals.reviewCount,
+          knownCount: totals.knownCount,
+          totalCards: totals.totalCards,
+          courses: recentCourses,
+          lastSyncAt: now
+        };
+
+        saveDB();
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          ok: true,
+          synced: true,
+          userId,
+          courseId: canonicalCourseId,
+          slug: canonicalKey,
+          reviewCount: totals.reviewCount,
+          pendingCourses: Object.values(recentCourses).filter((c) => c.reviewCount > 0).length
+        }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در همگام‌سازی پیشرفت مرور.' }));
+      }
+    });
+    return;
+  }
+
+  // ۵. API پرسش و حل سوال امتحانی با هوش مصنوعی (همراه با Rate-Limit و شمارش سهمیه سرور)
   if (req.method === 'POST' && url.pathname === '/api/ask-tutor') {
     let body = '';
     req.on('data', (chunk) => { if (body.length < 1024 * 1024) body += chunk; });
@@ -561,7 +688,7 @@ export const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ۵. API ثبت گزارش خطای هوشمند با سپر ضداسپم و داور AI
+  // ۶. API ثبت گزارش خطای هوشمند با سپر ضداسپم و داور AI
   if (req.method === 'POST' && url.pathname === '/api/report-issue') {
     let body = '';
     req.on('data', (chunk) => { if (body.length < 4096) body += chunk; });
@@ -811,7 +938,7 @@ export const server = http.createServer(async (req, res) => {
 
         await notifyTelegram(
           ADMIN_CHAT_ID,
-          `💸 <b>درخواست تسویه جزوه‌نویس</b>\\n👤 ${targetCreator}\\n🏦 ${cleanSheba}\\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
+          `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${targetCreator}\n🏦 ${cleanSheba}\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
           [[
             { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
             { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
@@ -862,11 +989,17 @@ export const server = http.createServer(async (req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 سرور جزوه زنده، درگاه امن جزوات و سپر ضداسپم روی پورت http://localhost:${PORT} فعال شد!`);
-  if (BOT_TOKEN) {
-    startTelegramBotPolling();
-  } else {
-    console.log('ℹ️ متغیر BOT_TOKEN تنظیم نشده است؛ ربات تلگرام در حالت آماده به کار (خاموش) قرار دارد.');
-  }
-});
+// فقط زمانی که فایل مستقیماً اجرا می‌شود سرور بالا بیاید؛
+// این کار import امن برای تست‌های خودکار (self_test) و ابزارهای CLI را ممکن می‌کند.
+const isDirectRun = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === __filename;
+
+if (isDirectRun) {
+  server.listen(PORT, () => {
+    console.log(`🚀 سرور جزوه زنده، درگاه امن جزوات و سپر ضداسپم روی پورت http://localhost:${PORT} فعال شد!`);
+    if (BOT_TOKEN) {
+      startTelegramBotPolling();
+    } else {
+      console.log('ℹ️ متغیر BOT_TOKEN تنظیم نشده است؛ ربات تلگرام در حالت آماده به کار (خاموش) قرار دارد.');
+    }
+  });
+}

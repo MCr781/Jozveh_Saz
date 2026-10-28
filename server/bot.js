@@ -1,22 +1,52 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { DB, saveDB, getUserStats, notifyTelegram, recordCourseSale } from './server.js';
+import { DB, saveDB, getUserStats, notifyTelegram, recordCourseSale, findCourseFile } from './server.js';
 import { generateCoursePackage } from '../factory/generate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const BOT_TOKEN = process.env.BOT_TOKEN || '';
-const ADMIN_CHAT_ID = String(process.env.ADMIN_CHAT_ID || '');
-const WEBAPP_URL = process.env.WEBAPP_URL || 'http://localhost:3000';
+// خواندن تنبل متغیرهای محیطی؛ چون server.js فایل .env را بعد از import این ماژول بارگذاری می‌کند.
+function getBotToken() {
+  return process.env.BOT_TOKEN || '';
+}
+function getAdminChatId() {
+  return String(process.env.ADMIN_CHAT_ID || '');
+}
+function getWebappUrl() {
+  const base = process.env.WEBAPP_URL || `http://localhost:${process.env.PORT || 3000}`;
+  return base.replace(/\/+$/, '');
+}
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+const REVIEW_REMINDER_DEFAULT_HOUR = 20;
+const REVIEW_REMINDER_DEFAULT_TICK_MS = 10 * 60 * 1000;
+
+function getReviewReminderHour() {
+  const value = Number(process.env.REVIEW_REMINDER_HOUR || REVIEW_REMINDER_DEFAULT_HOUR);
+  if (!Number.isFinite(value)) return REVIEW_REMINDER_DEFAULT_HOUR;
+  return Math.max(0, Math.min(23, Math.floor(value)));
+}
+
+function getReviewReminderTickMs() {
+  const value = Number(process.env.REVIEW_REMINDER_INTERVAL_MS || REVIEW_REMINDER_DEFAULT_TICK_MS);
+  if (!Number.isFinite(value)) return REVIEW_REMINDER_DEFAULT_TICK_MS;
+  return Math.max(60 * 1000, Math.floor(value));
+}
 
 let lastUpdateId = 0;
 let isPolling = false;
 
 async function tgApi(method, bodyObj) {
-  if (!BOT_TOKEN) return { ok: false };
-  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+  const botToken = getBotToken();
+  if (!botToken) return { ok: false };
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(bodyObj)
@@ -25,15 +55,187 @@ async function tgApi(method, bodyObj) {
 }
 
 async function downloadTelegramFile(fileId, destPath) {
+  const botToken = getBotToken();
   const info = await tgApi('getFile', { file_id: fileId });
   if (!info.ok || !info.result?.file_path) {
     throw new Error('دریافت آدرس فایل از تلگرام ناموفق بود.');
   }
   const filePath = info.result.file_path;
-  const fileRes = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
+  const fileRes = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`);
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   fs.writeFileSync(destPath, buffer);
 }
+
+// ===========================================================================
+// مرور لایتنر: استخراج دروس دارای کارت ضعیف + ساخت پیام یادآور + زمان‌بند شبانه
+// ===========================================================================
+
+// ساعت و تاریخ محلی تهران (با پشتیبانی از سرورهایی که Timezone آن‌ها UTC است)
+export function getTehranClock(date = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Tehran',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      hour12: false
+    }).formatToParts(date);
+    const map = {};
+    for (const part of parts) {
+      if (part.type !== 'literal') map[part.type] = part.value;
+    }
+    return {
+      day: `${map.year}-${map.month}-${map.day}`,
+      hour: Number(map.hour) % 24
+    };
+  } catch (_) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return { day: `${y}-${m}-${d}`, hour: date.getHours() };
+  }
+}
+
+// دروس دارای کارت نیازمند مرور برای یک دانشجو
+export function getPendingReviewCourses(userId) {
+  const progress = (DB.userStudyProgress || {})[String(userId)];
+  if (!progress) return [];
+
+  const records = [];
+  const perCourse = progress.courses && typeof progress.courses === 'object' ? progress.courses : {};
+
+  for (const [key, rec] of Object.entries(perCourse)) {
+    const reviewCount = Math.max(0, Number(rec?.reviewCount) || 0);
+    if (!reviewCount) continue;
+
+    const found = findCourseFile(rec?.slug || rec?.courseId || key);
+    records.push({
+      courseId: found?.data?.id || rec?.courseId || key,
+      slug: found?.slug || rec?.slug || key,
+      title: found?.data?.title || rec?.courseTitle || 'جزوه شب امتحان',
+      reviewCount,
+      totalCards: Math.max(0, Number(rec?.totalCards) || 0),
+      lastSyncAt: Number(rec?.lastSyncAt) || 0
+    });
+  }
+
+  // پشتیبانی از رکوردهای قدیمی که فقط شمارش کلی داشتند
+  if (!records.length && Number(progress.reviewCount) > 0) {
+    const found = findCourseFile('sample_course');
+    records.push({
+      courseId: found?.data?.id || 'sample_course',
+      slug: found?.slug || 'sample_course',
+      title: found?.data?.title || 'جزوه شب امتحان',
+      reviewCount: Math.max(0, Number(progress.reviewCount) || 0),
+      totalCards: Math.max(0, Number(progress.totalCards) || 0),
+      lastSyncAt: Number(progress.lastSyncAt) || 0
+    });
+  }
+
+  return records.sort((a, b) => b.reviewCount - a.reviewCount);
+}
+
+// متن و دکمه‌های شیشه‌ای یادآور مرور (مشترک بین دستور /review و زمان‌بند شبانه)
+export function buildReviewReminder(userId, courses, { manual = false } = {}) {
+  const base = getWebappUrl();
+  const topCourses = courses.slice(0, 3);
+  const totalPending = courses.reduce((sum, c) => sum + c.reviewCount, 0);
+
+  const lines = [];
+  lines.push(manual ? '🔄 <b>وضعیت مرور لایتنر شما</b>' : '⏰ <b>یادآور شب امتحان: کارت‌های نیازمند مرور</b>');
+  lines.push('');
+  lines.push(
+    manual
+      ? 'این کارت‌ها در صف مرور تو هستند و هنوز به خانهٔ آخر لایتنر نرسیده‌اند:'
+      : 'طبق آخرین همگام‌سازی، این کارت‌ها هنوز در صف مرور تو هستند:'
+  );
+  lines.push('');
+
+  for (const c of topCourses) {
+    const totalPart = c.totalCards ? ` از ${c.totalCards}` : '';
+    lines.push(`📚 <b>${escapeHtml(c.title)}</b>`);
+    lines.push(`   🔄 ${c.reviewCount}${totalPart} کارت نیازمند مرور`);
+  }
+  if (courses.length > topCourses.length) {
+    lines.push(`➕ و ${courses.length - topCourses.length} درس دیگر...`);
+  }
+
+  lines.push('');
+  lines.push('💡 روش لایتنر: کارت را ببین؛ اگر یادت نبود «🔄 مرور مجدد» و بعد از تسلط «✅ بلدم» را بزن.');
+  lines.push('');
+  lines.push('👇 همین حالا کارت‌های ضعیف را مرور کن:');
+
+  const keyboard = topCourses.map((c) => {
+    const shortTitle = c.title.length > 26 ? `${c.title.slice(0, 26)}…` : c.title;
+    return [{
+      text: `🔄 مرور ${shortTitle}`,
+      web_app: { url: `${base}/?course=${encodeURIComponent(c.slug)}&review=1` }
+    }];
+  });
+  keyboard.push([{ text: '📚 کاتالوگ جزوات', web_app: { url: `${base}/` } }]);
+
+  return { text: lines.join('\n'), keyboard, totalPending };
+}
+
+// ارسال یادآور به همه دانشجویانی که کارت مرورنشده دارند (هر کاربر حداکثر یک بار در شب)
+export async function sendReviewReminders({ force = false, now = new Date() } = {}) {
+  if (!getBotToken()) {
+    return { ok: false, reason: 'no_bot_token', sent: 0 };
+  }
+
+  const { day, hour } = getTehranClock(now);
+  if (!force && hour < getReviewReminderHour()) {
+    return { ok: true, skipped: 'before_window', sent: 0, day, hour };
+  }
+
+  const userIds = Object.keys(DB.userStudyProgress || {});
+  let sent = 0;
+
+  for (const userId of userIds) {
+    const progress = DB.userStudyProgress[userId];
+    if (!progress || typeof progress !== 'object' || Array.isArray(progress)) continue;
+    if (!force && progress.lastReminderDate === day) continue;
+
+    const courses = getPendingReviewCourses(userId);
+    if (!courses.length) continue;
+
+    const payload = buildReviewReminder(userId, courses, { manual: false });
+    await notifyTelegram(userId, payload.text, payload.keyboard);
+
+    progress.lastReminderDate = day;
+    progress.lastReminderAt = Date.now();
+    sent++;
+
+    // فاصله کوچک برای احترام به محدودیت نرخ ارسال تلگرام
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+
+  if (sent > 0) saveDB();
+  return { ok: true, sent, day, hour, candidates: userIds.length };
+}
+
+let reviewReminderTimer = null;
+
+export function startReviewReminderScheduler() {
+  if (reviewReminderTimer) return reviewReminderTimer;
+
+  const tick = () => {
+    sendReviewReminders().catch((err) => {
+      console.warn('⚠️ خطای زمان‌بند یادآور مرور لایتنر:', err?.message || err);
+    });
+  };
+
+  const initialTimer = setTimeout(tick, 10 * 1000);
+  if (typeof initialTimer.unref === 'function') initialTimer.unref();
+
+  reviewReminderTimer = setInterval(tick, getReviewReminderTickMs());
+  if (typeof reviewReminderTimer.unref === 'function') reviewReminderTimer.unref();
+
+  console.log(`⏰ زمان‌بند یادآور مرور لایتنر فعال شد (هر شب از ساعت ${getReviewReminderHour()} به وقت تهران).`);
+  return reviewReminderTimer;
+}
+
 
 async function handleUpdate(update) {
   // ۱. مدیریت دکمه‌های شیشه‌ای ادمین (تایید خطا + تایید پرداخت کارت‌به‌کارت با واریز سهم ۷۰٪)
@@ -42,7 +244,27 @@ async function handleUpdate(update) {
     const fromId = String(cb.from.id);
     const data = cb.data || '';
 
-    if (fromId !== ADMIN_CHAT_ID) return;
+    // دکمه عمومی «مرور کارت‌های ضعیف» برای همه دانشجویان
+    if (data === 'cmd_review') {
+      const pendingCourses = getPendingReviewCourses(fromId);
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🔄 در حال آماده‌سازی کارت‌های مرور...' });
+
+      if (!pendingCourses.length) {
+        await notifyTelegram(
+          fromId,
+          '✅ <b>در حال حاضر هیچ کارتی در صف مرور نداری!</b>\n\n' +
+          'در تب «فلش‌کارت» هر کارتی را که با دکمهٔ «🔄 مرور مجدد در شب امتحان» علامت بزنی، همین‌جا ثبت می‌شود.',
+          [[{ text: '🗂️ ورود به فلش‌کارت‌ها', web_app: { url: `${getWebappUrl()}/` } }]]
+        );
+        return;
+      }
+
+      const reminder = buildReviewReminder(fromId, pendingCourses, { manual: true });
+      await notifyTelegram(fromId, reminder.text, reminder.keyboard);
+      return;
+    }
+
+    if (fromId !== getAdminChatId()) return;
 
     // الف) تایید گزارش خطای علمی و ارتقای حافظه مدل
     if (data.startsWith('approve_rep_')) {
@@ -102,7 +324,7 @@ async function handleUpdate(update) {
       await notifyTelegram(
         targetUserId,
         '✅ <b>پرداخت شما تایید شد و قفل کامل پکیج باز گردید!</b>\nهم‌اکنون می‌توانید وارد جزوه زنده شوید و به تمام فلش‌کارت‌ها، سوالات پایانترم و ۱۰۰ پرسش هوش مصنوعی دسترسی داشته باشید.',
-        [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${WEBAPP_URL}/?course=${finalCourseId}` } }]]
+        [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${getWebappUrl()}/?course=${finalCourseId}` } }]]
       );
     }
     // د) تایید تسویه حساب جزوه‌نویس (پرداخت سهم ۷۰٪)
@@ -119,7 +341,7 @@ async function handleUpdate(update) {
       }
       saveDB();
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ تسویه تایید و ثبت شد.' });
-      await notifyTelegram(pr.creatorId, `✅ <b>تسویه حساب شما تایید شد!</b>\\nمبلغ ${pr.amount.toLocaleString('fa-IR')} تومان به شماره شبا ${pr.sheba} واریز گردید.`);
+      await notifyTelegram(pr.creatorId, `✅ <b>تسویه حساب شما تایید شد!</b>\nمبلغ ${pr.amount.toLocaleString('fa-IR')} تومان به شماره شبا ${pr.sheba} واریز گردید.`);
     }
 
     if (data.startsWith('reject_payout_')) {
@@ -149,10 +371,12 @@ async function handleUpdate(update) {
       '🗂️ فلش‌کارت‌های سه‌بعدی لایتنر شب امتحان\n' +
       '📝 شبیه‌ساز سوالات امتحانی استاد با پاسخ تشریحی\n' +
       '⚡ دستیار هوش مصنوعی حل سوال (بدون نیاز به فیلترشکن)\n' +
-      '💰 امکان کسب درآمد ۷۰٪ از فروش جزوه دست‌نویس خودتان\n\n' +
+      '💰 امکان کسب درآمد ۷۰٪ از فروش جزوه دست‌نویس خودتان\n' +
+      '🔄 مرور کارت‌های ضعیف لایتنر با دستور /review\n\n' +
       '👇 برای شروع روی دکمه زیر بزنید یا اگر رسید کارت‌به‌کارت دارید، عکس آن را همین‌جا بفرستید:',
       [
-        [{ text: '🎓 ورود به جزوه زنده (کاتالوگ دروس)', web_app: { url: `${WEBAPP_URL}/` } }],
+        [{ text: '🎓 ورود به جزوه زنده (کاتالوگ دروس)', web_app: { url: `${getWebappUrl()}/` } }],
+        [{ text: '🔄 مرور کارت‌های ضعیف (/review)', callback_data: 'cmd_review' }],
         [{ text: '💰 داشبورد درآمد جزوه‌نویس (/income)', callback_data: 'cmd_income' }]
       ]
     );
@@ -172,12 +396,31 @@ async function handleUpdate(update) {
       `📊 تعداد کل فروش: <b>${salesStr} پکیج</b>\n` +
       `💵 موجودی قابل تسویه: <b>${balanceStr} تومان</b>\n\n` +
       `💡 <i>تسویه حساب‌ها هر پنج‌شنبه به شماره شبای ثبت‌شده شما واریز می‌شود. برای ثبت جزوه جدید، فایل PDF خود را همین‌جا ارسال کنید.</i>`,
-      [[{ text: '📚 باز کردن کاتالوگ جزوات', web_app: { url: `${WEBAPP_URL}/` } }]]
+      [[{ text: '📚 باز کردن کاتالوگ جزوات', web_app: { url: `${getWebappUrl()}/` } }]]
     );
     return;
   }
 
-  // ۳.۱ دستور /payout برای ثبت شبا و درخواست تسویه حساب جزوه‌نویسان
+  // ۳.۱ دستور /review برای مرور کارت‌های ضعیف لایتنر
+  if (msg.text && (msg.text.startsWith('/review') || msg.text === 'مرور')) {
+    const pendingCourses = getPendingReviewCourses(chatId);
+
+    if (!pendingCourses.length) {
+      await notifyTelegram(
+        chatId,
+        '✅ <b>در حال حاضر هیچ کارتی در صف مرور نداری!</b>\n\n' +
+        'هر کارتی را که در تب «فلش‌کارت» با دکمهٔ «🔄 مرور مجدد در شب امتحان» علامت بزنی، همین‌جا ثبت می‌شود و قبل از امتحان یادآوری می‌گیری.',
+        [[{ text: '🗂️ ورود به فلش‌کارت‌ها', web_app: { url: `${getWebappUrl()}/` } }]]
+      );
+      return;
+    }
+
+    const reminder = buildReviewReminder(chatId, pendingCourses, { manual: true });
+    await notifyTelegram(chatId, reminder.text, reminder.keyboard);
+    return;
+  }
+
+  // ۳.۲ دستور /payout برای ثبت شبا و درخواست تسویه حساب جزوه‌نویسان
   if (msg.text && msg.text.startsWith('/payout')) {
     const parts = msg.text.trim().split(/\s+/);
     const stats = DB.creatorEarnings[chatId] || { balanceToman: 0, salesCount: 0, history: [] };
@@ -189,7 +432,7 @@ async function handleUpdate(update) {
       DB.creatorSheba[chatId] = sheba;
 
       if (balance <= 0) {
-        await notifyTelegram(chatId, `🏦 شماره شبا ${sheba} ثبت شد.\\nموجودی قابل تسویه شما در حال حاضر ۰ تومان است.`);
+        await notifyTelegram(chatId, `🏦 شماره شبا ${sheba} ثبت شد.\nموجودی قابل تسویه شما در حال حاضر ۰ تومان است.`);
         saveDB();
         return;
       }
@@ -199,7 +442,7 @@ async function handleUpdate(update) {
       DB.payoutRequests[payoutId] = { creatorId: chatId, sheba, amount: balance, status: 'pending', createdAt: Date.now() };
       saveDB();
 
-      await notifyTelegram(ADMIN_CHAT_ID, `💸 <b>درخواست تسویه جزوه‌نویس</b>\\n👤 ${chatId}\\n🏦 ${sheba}\\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
+      await notifyTelegram(getAdminChatId(), `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${chatId}\n🏦 ${sheba}\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
         { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
         { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
       ]]);
@@ -211,10 +454,10 @@ async function handleUpdate(update) {
     const savedSheba = (DB.creatorSheba || {})[chatId] || 'ثبت نشده';
     await notifyTelegram(
       chatId,
-      `🏦 <b>تسویه حساب جزوه‌نویس</b>\\n\\n` +
-      `💵 موجودی قابل تسویه: <b>${balance.toLocaleString('fa-IR')} تومان</b>\\n` +
-      `💳 شبا ثبت‌شده: <code>${savedSheba}</code>\\n\\n` +
-      `برای ثبت شبا و درخواست تسویه، دستور زیر را ارسال کنید:\\n` +
+      `🏦 <b>تسویه حساب جزوه‌نویس</b>\n\n` +
+      `💵 موجودی قابل تسویه: <b>${balance.toLocaleString('fa-IR')} تومان</b>\n` +
+      `💳 شبا ثبت‌شده: <code>${savedSheba}</code>\n\n` +
+      `برای ثبت شبا و درخواست تسویه، دستور زیر را ارسال کنید:\n` +
       `<code>/payout IR123456789012345678901234</code>`
     );
     return;
@@ -222,7 +465,7 @@ async function handleUpdate(update) {
 
 
   // ۴. اگر ادمین فایل PDF جزوه بفرستد <- تبدیل خودکار به پکیج جزوه زنده!
-  if (chatId === ADMIN_CHAT_ID && msg.document) {
+  if (chatId === getAdminChatId() && msg.document) {
     const uploadsDir = path.join(__dirname, 'uploads');
     fs.mkdirSync(uploadsDir, { recursive: true });
     const localInput = path.join(uploadsDir, msg.document.file_name || `note_${Date.now()}.pdf`);
@@ -245,7 +488,7 @@ async function handleUpdate(update) {
       await notifyTelegram(
         chatId,
         `✅ <b>پکیج جزوه زنده بدون دخالت دست ساخته شد!</b>\n🆔 شناسه: <code>${courseSlug}</code>`,
-        [[{ text: '👁️ مشاهده جزوه زنده جدید', web_app: { url: `${WEBAPP_URL}/?course=${courseSlug}` } }]]
+        [[{ text: '👁️ مشاهده جزوه زنده جدید', web_app: { url: `${getWebappUrl()}/?course=${courseSlug}` } }]]
       );
     } catch (err) {
       await notifyTelegram(chatId, `❌ خطا در ساخت خودکار جزوه: ${err.message}`);
@@ -254,10 +497,10 @@ async function handleUpdate(update) {
   }
 
   // ۵. اگر دانشجو عکس رسید کارت‌به‌کارت بفرستد <- ارسال برای ادمین با دکمه تایید ۱ کلیکی
-  if (msg.photo && chatId !== ADMIN_CHAT_ID) {
+  if (msg.photo && chatId !== getAdminChatId()) {
     const bestPhoto = msg.photo[msg.photo.length - 1].file_id;
     await tgApi('sendPhoto', {
-      chat_id: ADMIN_CHAT_ID,
+      chat_id: getAdminChatId(),
       photo: bestPhoto,
       caption: `💳 <b>رسید کارت‌به‌کارت جدید</b>\n👤 دانشجو: <code>${chatId}</code> (@${msg.from.username || 'بدون_نام_کاربری'})`,
       parse_mode: 'HTML',
@@ -272,7 +515,7 @@ async function handleUpdate(update) {
 }
 
 export async function startTelegramBotPolling() {
-  if (!BOT_TOKEN) {
+  if (!getBotToken()) {
     console.log('ℹ️ متغیر BOT_TOKEN تنظیم نشده است؛ ربات تلگرام در حالت آماده به کار (خاموش) قرار دارد.');
     return;
   }
@@ -280,6 +523,8 @@ export async function startTelegramBotPolling() {
   isPolling = true;
 
   console.log('🤖 ربات تلگرام جزوه زنده (Long-Polling) فعال شد!');
+  startReviewReminderScheduler();
+
   while (isPolling) {
     try {
       const data = await tgApi('getUpdates', { offset: lastUpdateId + 1, timeout: 25 });
