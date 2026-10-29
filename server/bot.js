@@ -3,9 +3,15 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { DB, saveDB, getUserStats, notifyTelegram, recordCourseSale, findCourseFile } from './server.js';
+import { db, DB, saveDB, getUserStats, recordCourseSale, findCourseFile } from './server.js';
+import { tgApi, notifyTelegram } from './telegram.js';
+import * as commerceRepo from './repo/commerce.js';
+import * as reportsRepo from './repo/reports.js';
+import * as aiRepo from './repo/ai.js';
 import { isValidSheba } from './sheba.js';
 import { generateCoursePackage } from '../factory/generate.js';
+
+export { tgApi, notifyTelegram } from './telegram.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,30 +51,6 @@ function getReviewReminderTickMs() {
 
 let lastUpdateId = 0;
 let isPolling = false;
-
-export async function tgApi(method, bodyObj = {}) {
-  const botToken = process.env.BOT_TOKEN?.trim();
-  if (!botToken) {
-    console.warn(`⚠️ Telegram tgApi('${method}') skipped: BOT_TOKEN is empty.`);
-    return { ok: false, description: 'BOT_TOKEN is empty' };
-  }
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(bodyObj)
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || (data && !data.ok)) {
-      console.error(`❌ Telegram tgApi('${method}') failed (${res.status}):`, data || res.statusText);
-      return data || { ok: false, error_code: res.status, description: res.statusText };
-    }
-    return data;
-  } catch (err) {
-    console.error(`❌ Telegram tgApi('${method}') network error:`, err.message || err);
-    return { ok: false, description: err.message };
-  }
-}
 
 async function downloadTelegramFile(fileId, destPath) {
   const botToken = process.env.BOT_TOKEN?.trim() || getBotToken();
@@ -308,6 +290,11 @@ async function handleUpdate(update) {
       } catch (_) {}
 
       // اهدای ۲ سهمیه رایگان به دانشجوی گزارش‌دهنده
+      try {
+        reportsRepo.resolveReport(db, { reportId, approve: true });
+        aiRepo.addBonusQuota(db, { userId: rep.userId, bonus: 2 });
+      } catch (_) {}
+
       const st = getUserStats(rep.userId);
       st.bonusQuota = (st.bonusQuota || 0) + 2;
       saveDB();
@@ -324,6 +311,10 @@ async function handleUpdate(update) {
 
       rep.status = 'rejected';
       delete DB.reportedItemsLock[`${rep.courseId}_${rep.itemId}`];
+
+      try {
+        reportsRepo.resolveReport(db, { reportId, approve: false });
+      } catch (_) {}
 
       const st = getUserStats(rep.userId);
       st.rejectedStrikes = (st.rejectedStrikes || 0) + 1;
@@ -349,6 +340,9 @@ async function handleUpdate(update) {
         receipt.status = 'approved';
         receipt.approvedAt = Date.now();
         saveDB();
+        try {
+          db.prepare("UPDATE receipts SET status = 'approved', resolved_at = ? WHERE receipt_id = ?").run(Date.now(), receiptId);
+        } catch (_) {}
         targetUserId = receipt.userId;
         courseId = receipt.courseId;
       } else {
@@ -390,6 +384,9 @@ async function handleUpdate(update) {
         stats.history.push({ type: 'payout', amount: pr.amount, at: Date.now(), status: 'paid' });
       }
       saveDB();
+      try {
+        commerceRepo.resolvePayout(db, { payoutId, approve: true });
+      } catch (_) {}
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ تسویه تایید و ثبت شد.' });
       await notifyTelegram(pr.creatorId, `✅ <b>تسویه حساب شما تایید شد!</b>\nمبلغ ${pr.amount.toLocaleString('fa-IR')} تومان به شماره شبا ${pr.sheba} واریز گردید.`);
     }
@@ -413,6 +410,9 @@ async function handleUpdate(update) {
         stats.history.push({ type: 'payout_rejected', amount: pr.amount, at: Date.now(), status: 'rejected' });
       }
       saveDB();
+      try {
+        commerceRepo.resolvePayout(db, { payoutId, approve: false });
+      } catch (_) {}
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 تسویه رد شد و موجودی بازگشت داده شد.' });
       await notifyTelegram(pr.creatorId, '🚫 <b>درخواست تسویه شما رد شد.</b> مبلغ درخواستی به موجودی شما بازگردانده شد. لطفاً با پشتیبانی تماس بگیرید.');
     }
@@ -533,6 +533,9 @@ async function handleUpdate(update) {
         createdAt: Date.now()
       };
       saveDB();
+      try {
+        commerceRepo.requestPayout(db, { creatorId: chatId, sheba, amountToman: balance, payoutId });
+      } catch (_) {}
 
       if (adminChatId) {
         await notifyTelegram(adminChatId, `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 <code>${chatId}</code>\n🏦 <code>${sheba}</code>\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
@@ -637,6 +640,9 @@ async function handleUpdate(update) {
       createdAt: Date.now()
     };
     saveDB();
+    try {
+      commerceRepo.createReceipt(db, { receiptId, userId: chatId, courseId: selectedCourseId });
+    } catch (_) {}
 
     await tgApi('sendPhoto', {
       chat_id: adminChatId,

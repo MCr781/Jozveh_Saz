@@ -3,5 +3,9 @@ node_modules/
 *.tmp
 *.bak
 server/state_db.json
+*.db
+*.db-wal
+*.db-shm
+migration_report.json
 server/uploads/
 .DS_Store

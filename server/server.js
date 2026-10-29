@@ -6,23 +6,42 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { isValidSheba } from './sheba.js';
 import { startTelegramBotPolling } from './bot.js';
+import { config, validateConfigOrExit } from './config.js';
+import { openDb, migrate, tx } from './db.js';
+import * as commerceRepo from './repo/commerce.js';
+import * as usersRepo from './repo/users.js';
+import * as aiRepo from './repo/ai.js';
+import * as progressRepo from './repo/progress.js';
+import * as reportsRepo from './repo/reports.js';
+import { tgApi, notifyTelegram } from './telegram.js';
+import { requireUser, optionalUser, verifyInitData as authVerifyInitData, extractInitDataRaw, HttpError } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export { loadEnvFile, getEnv } from './env.js';
+export { tgApi, notifyTelegram } from './telegram.js';
+export { requireUser, optionalUser, HttpError } from './auth.js';
+export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo };
 
-export const PORT = Number(process.env.PORT?.trim()) || 3000;
+export const PORT = Number(process.env.PORT?.trim()) || config.port || 3000;
 
-export const DEFAULT_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MAX_AGE_SEC?.trim()) || 86400;
-export const MONEY_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MONEY_MAX_AGE_SEC?.trim()) || 3600;
+export const DEFAULT_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MAX_AGE_SEC?.trim()) || config.initDataMaxAgeSec || 86400;
+export const MONEY_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MONEY_MAX_AGE_SEC?.trim()) || config.initDataMoneyMaxAgeSec || 3600;
+
+// SQLite Core Setup
+const rawDbPath = process.env.STATE_DB_PATH?.trim() || config.stateDbPath;
+const sqlitePath = rawDbPath.endsWith('.json') ? rawDbPath.replace(/\.json$/i, '.db') : rawDbPath;
+const db = openDb(sqlitePath);
+migrate(db);
 
 export function getGeminiKeys() {
-  return [
+  const keys = [
     process.env.GEMINI_API_KEY_1?.trim() || '',
     process.env.GEMINI_API_KEY_2?.trim() || '',
     process.env.GEMINI_API_KEY_3?.trim() || ''
   ].filter((k) => k && !k.startsWith('YOUR_'));
+  return keys.length ? keys : config.geminiKeys;
 }
 
 let keyIdx = 0;
@@ -34,7 +53,33 @@ export function getNextGeminiKey() {
   return apiKey;
 }
 
-export async function callGeminiRestServer({ contents, generationConfig, model = 'gemini-2.5-flash' }) {
+let modelProbeStatus = 'skipped';
+export async function probeGeminiModel() {
+  const keys = getGeminiKeys();
+  if (!keys.length) {
+    modelProbeStatus = 'skipped';
+    return;
+  }
+  const model = process.env.GEMINI_MODEL?.trim() || config.geminiModel || 'gemini-2.5-flash';
+  const apiKey = keys[0];
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}?key=${apiKey}`, {
+      headers: { 'x-goog-api-key': apiKey },
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined
+    });
+    if (res.ok) {
+      modelProbeStatus = 'ok';
+    } else {
+      console.warn(`⚠️ Gemini model probe (${model}) returned status ${res.status}`);
+      modelProbeStatus = 'fail';
+    }
+  } catch (err) {
+    console.warn(`⚠️ Gemini model probe failed: ${err.message}`);
+    modelProbeStatus = 'fail';
+  }
+}
+
+export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-2.5-flash' }) {
   const apiKey = getNextGeminiKey();
   if (!apiKey) return null;
 
@@ -58,6 +103,44 @@ export async function callGeminiRestServer({ contents, generationConfig, model =
   return text;
 }
 
+function createCreatorEarningsProxy(initial = {}) {
+  const target = { ...initial };
+  return new Proxy(target, {
+    set(obj, prop, value) {
+      obj[prop] = value;
+      try {
+        const creatorId = String(prop);
+        const targetBal = Number(value?.balanceToman || 0);
+        const currentBal = commerceRepo.balanceOf(db, creatorId);
+        const diff = targetBal - currentBal;
+        if (diff !== 0) {
+          db.prepare(`
+            INSERT INTO creator_ledger(creator_id, kind, amount_toman, ref, created_at)
+            VALUES(?, 'adjustment', ?, ?, ?)
+          `).run(creatorId, diff, `seed:${Date.now()}:${Math.random()}`, Date.now());
+        }
+      } catch (_) {}
+      return true;
+    },
+    get(obj, prop) {
+      if (typeof prop === 'symbol' || prop === 'inspect' || prop === 'valueOf') {
+        return obj[prop];
+      }
+      const creatorId = String(prop);
+      try {
+        const bal = commerceRepo.balanceOf(db, creatorId);
+        const existing = obj[prop] || { salesCount: 0, history: [] };
+        return {
+          ...existing,
+          balanceToman: bal
+        };
+      } catch (_) {
+        return obj[prop];
+      }
+    }
+  });
+}
+
 // امکان تزریق مسیر دیتابیس برای تست‌های ایزوله (STATE_DB_PATH)؛ در تولید همان state_db.json است.
 export const DB_PATH = path.resolve(process.env.STATE_DB_PATH || path.join(__dirname, 'state_db.json'));
 export let DB = {
@@ -65,7 +148,7 @@ export let DB = {
   userSpamStats: {},    // { userId: { lastReportAt, dailyCount, dayStamp, rejectedStrikes, bonusQuota, usedAiQueries, lastChatAt } }
   pendingReports: {},   // { reportId: { courseId, itemId, userId, claim, proposedFix, learnedRule, status } }
   reportedItemsLock: {}, // { "courseId_itemId": true }
-  creatorEarnings: {},   // { creator_telegram_id: { balanceToman, heldToman, salesCount, history: [] } }
+  creatorEarnings: createCreatorEarningsProxy(),   // { creator_telegram_id: { balanceToman, heldToman, salesCount, history: [] } }
   userStudyProgress: {}, // { userId: { reviewCount, lastSyncAt } }
   pendingPayments: {},   // { authority: { userId, courseId, amount, state, createdAt } }
   creatorSheba: {},      // { creatorId: "IR..." }
@@ -76,26 +159,32 @@ export let DB = {
 
 if (fs.existsSync(DB_PATH)) {
   try {
-    DB = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-    if (!DB.purchases) DB.purchases = {};
-    if (!DB.userSpamStats) DB.userSpamStats = {};
-    if (!DB.pendingReports) DB.pendingReports = {};
-    if (!DB.reportedItemsLock) DB.reportedItemsLock = {};
-    if (!DB.creatorEarnings) DB.creatorEarnings = {};
-    if (!DB.userStudyProgress) DB.userStudyProgress = {};
-    if (!DB.pendingPayments) DB.pendingPayments = {};
-    if (!DB.creatorSheba) DB.creatorSheba = {};
-    if (!DB.payoutRequests) DB.payoutRequests = {};
-    if (!DB.receipts) DB.receipts = {};
-    if (!DB.userPendingCourseSelection) DB.userPendingCourseSelection = {};
+    const loaded = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    if (loaded.purchases) DB.purchases = loaded.purchases;
+    if (loaded.userSpamStats) DB.userSpamStats = loaded.userSpamStats;
+    if (loaded.pendingReports) DB.pendingReports = loaded.pendingReports;
+    if (loaded.reportedItemsLock) DB.reportedItemsLock = loaded.reportedItemsLock;
+    if (loaded.creatorEarnings) {
+      for (const [k, v] of Object.entries(loaded.creatorEarnings)) {
+        DB.creatorEarnings[k] = v;
+      }
+    }
+    if (loaded.userStudyProgress) DB.userStudyProgress = loaded.userStudyProgress;
+    if (loaded.pendingPayments) DB.pendingPayments = loaded.pendingPayments;
+    if (loaded.creatorSheba) DB.creatorSheba = loaded.creatorSheba;
+    if (loaded.payoutRequests) DB.payoutRequests = loaded.payoutRequests;
+    if (loaded.receipts) DB.receipts = loaded.receipts;
+    if (loaded.userPendingCourseSelection) DB.userPendingCourseSelection = loaded.userPendingCourseSelection;
   } catch (_) {}
 }
 
 export function saveDB() {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  const tmp = `${DB_PATH}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(DB, null, 2), 'utf8');
-  fs.renameSync(tmp, DB_PATH);
+  try {
+    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+    const tmp = `${DB_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(DB, null, 2), 'utf8');
+    fs.renameSync(tmp, DB_PATH);
+  } catch (_) {}
 }
 
 // یافتن امن فایل جزوه بر اساس slug یا id
@@ -130,18 +219,27 @@ export function findCourseFile(identifier) {
 }
 
 // ثبت خرید و واریز سهم ۷۰ درصدی جزوه‌نویس
-export async function recordCourseSale(buyerUserId, courseSlugOrId) {
+export async function recordCourseSale(buyerUserId, courseSlugOrId, customPaymentRef = null) {
   const found = findCourseFile(courseSlugOrId);
   const courseId = found?.data?.id || courseSlugOrId;
   const courseTitle = found?.data?.title || 'پکیج آموزشی شب امتحان';
   const priceToman = found?.data?.price_toman || 59000;
   const creatorId = found?.data?.creator_telegram_id || 'creator_demo_1';
+  const paymentRef = customPaymentRef || `sale_${buyerUserId}_${courseId}_${Date.now()}_${Math.random()}`;
 
-  // ۱. ثبت دائم دسترسی برای خریدار
+  // ۱. ثبت تراکنشی در هسته دیتابیس SQLite
+  const buyerNumeric = Number(buyerUserId);
+  const saleRes = commerceRepo.recordSale(db, {
+    buyerId: Number.isSafeInteger(buyerNumeric) && buyerNumeric > 0 ? buyerNumeric : 1,
+    courseId,
+    creatorId,
+    priceToman,
+    source: 'manual_receipt',
+    paymentRef
+  });
+
+  // ۲. همگام‌سازی شیء سراسری DB برای سازگاری عقب‌رو
   DB.purchases[`${buyerUserId}_${courseId}`] = true;
-
-  // ۲. محاسبه سهم ۷۰٪ جزوه‌نویس
-  const creatorShareToman = Math.round(priceToman * 0.7);
 
   if (!DB.creatorEarnings[creatorId]) {
     DB.creatorEarnings[creatorId] = {
@@ -153,7 +251,8 @@ export async function recordCourseSale(buyerUserId, courseSlugOrId) {
   }
 
   const creatorRecord = DB.creatorEarnings[creatorId];
-  creatorRecord.balanceToman = (creatorRecord.balanceToman || 0) + creatorShareToman;
+  const creatorShareToman = saleRes.creatorShare || Math.floor((priceToman * 70) / 100);
+  creatorRecord.balanceToman = commerceRepo.balanceOf(db, creatorId);
   creatorRecord.salesCount = (creatorRecord.salesCount || 0) + 1;
   creatorRecord.history.push({
     courseId,
@@ -167,7 +266,7 @@ export async function recordCourseSale(buyerUserId, courseSlugOrId) {
   saveDB();
 
   // ۳. ارسال پیام تلگرام برای جزوه‌نویس
-  const botToken = process.env.BOT_TOKEN?.trim();
+  const botToken = config.botToken || process.env.BOT_TOKEN?.trim();
   if (botToken && creatorId && !creatorId.startsWith('creator_demo')) {
     await notifyTelegram(
       creatorId,
@@ -346,29 +445,6 @@ async function verifyReportWithAIJudge({ originalText, userClaim, sourcePage }) 
   }
 }
 
-export async function notifyTelegram(chatId, text, inlineKeyboard = null) {
-  const botToken = process.env.BOT_TOKEN?.trim();
-  if (!botToken || !chatId) return null;
-  try {
-    const payload = { chat_id: chatId, text, parse_mode: 'HTML' };
-    if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || (data && !data.ok)) {
-      console.error(`❌ Telegram notifyTelegram error (${res.status}):`, data || res.statusText);
-      return data || { ok: false, status: res.status };
-    }
-    return data;
-  } catch (err) {
-    console.error('❌ Telegram notifyTelegram fetch error:', err.message || err);
-    return null;
-  }
-}
-
 // سانسور سمت سرور برای کارت‌های قفل‌شده (ضد هک از طریق Network Tab)
 function stripLockedContentForFreeUser(courseObj) {
   const clone = JSON.parse(JSON.stringify(courseObj));
@@ -401,13 +477,33 @@ const IMMUTABLE_CACHE_CONTROL = 'public, max-age=604800, immutable';
 
 export const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Telegram-Init-Data');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Telegram-Init-Data, Authorization');
   // هدرهای امنیتی پایه (سازگار با WebView تلگرام)
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'ALLOWALL');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // ۰. بررسی سلامت سرور و پروب مدل هوش مصنوعی (Health & Monitoring)
+  if (req.method === 'GET' && (url.pathname === '/api/health' || url.pathname === '/healthz')) {
+    let dbStatus = 'down';
+    try {
+      db.prepare('SELECT 1').get();
+      dbStatus = 'up';
+    } catch (_) {
+      dbStatus = 'down';
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      ok: dbStatus === 'up',
+      db: dbStatus,
+      modelProbe: modelProbeStatus,
+      version: '1.7.0'
+    }));
+    return;
+  }
 
   // ۱. کاتالوگ چنددرسی امن (Multi-Course Catalog)
   if (req.method === 'GET' && url.pathname === '/api/courses') {
@@ -470,26 +566,23 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const userId = String(auth.user.id);
-    const stats = DB.creatorEarnings[userId] || {
-      balanceToman: 0,
-      heldToman: 0,
-      salesCount: 0,
-      history: []
-    };
-
-    const sanitizedHistory = (stats.history || []).map((h) => {
-      const { buyerUserId, ...rest } = h;
-      return rest;
-    });
+    const stats = commerceRepo.getCreatorStats(db, userId);
+    const inMem = DB.creatorEarnings[userId] || {};
+    const history = (stats.history && stats.history.length)
+      ? stats.history
+      : (inMem.history || []).map((h) => {
+          const { buyerUserId, ...rest } = h;
+          return rest;
+        });
 
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       ok: true,
       creatorId: userId,
-      balanceToman: stats.balanceToman || 0,
-      heldToman: stats.heldToman || 0,
-      salesCount: stats.salesCount || 0,
-      history: sanitizedHistory
+      balanceToman: stats.balanceToman,
+      heldToman: stats.heldToman,
+      salesCount: stats.salesCount,
+      history
     }));
     return;
   }
@@ -876,9 +969,16 @@ export const server = http.createServer(async (req, res) => {
         const price = found.data?.price_toman || 59000;
         const courseTitle = found.data?.title || 'پکیج شب امتحان';
 
-        const allowDemo = process.env.ALLOW_DEMO_PAYMENTS === '1' && process.env.NODE_ENV !== 'production';
+        const allowDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
         if (allowDemo) {
           const authority = `DEMO_${crypto.randomUUID()}`;
+          commerceRepo.createPaymentIntent(db, {
+            authority,
+            userId: Number(userId) || 1,
+            courseId: cid,
+            amountToman: price,
+            state: 'created'
+          });
           DB.pendingPayments = DB.pendingPayments || {};
           DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, state: 'pending', createdAt: Date.now() };
           saveDB();
@@ -887,17 +987,17 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const merchantId = process.env.MERCHANT_ID?.trim() || '';
+        const merchantId = (process.env.MERCHANT_ID || config.merchantId || '').trim();
         if (!merchantId || merchantId.startsWith('YOUR_') || merchantId.toLowerCase() === 'demo') {
           res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, code: 'GATEWAY_UNAVAILABLE', message: 'درگاه پرداخت پیکربندی نشده است.' }));
           return;
         }
 
-        const callbackBase = process.env.PAYMENT_CALLBACK_BASE?.trim() || process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`;
+        const callbackBase = (process.env.PAYMENT_CALLBACK_BASE || config.paymentCallbackBase || process.env.WEBAPP_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
         const callbackUrl = `${callbackBase}/api/payment/verify`;
         try {
-          const zarinpalBase = process.env.ZARINPAL_BASE?.trim() || 'https://api.zarinpal.com';
+          const zarinpalBase = (process.env.ZARINPAL_BASE || config.zarinpalBase || 'https://api.zarinpal.com').replace(/\/+$/, '');
           const zRes = await fetch(`${zarinpalBase}/pg/v4/payment/request.json`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -911,6 +1011,13 @@ export const server = http.createServer(async (req, res) => {
           const zData = await zRes.json().catch(() => null);
           if (zData?.data?.code === 100 && zData?.data?.authority) {
             const authority = zData.data.authority;
+            commerceRepo.createPaymentIntent(db, {
+              authority,
+              userId: Number(userId) || 1,
+              courseId: cid,
+              amountToman: price,
+              state: 'redirected'
+            });
             DB.pendingPayments = DB.pendingPayments || {};
             DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, state: 'pending', createdAt: Date.now() };
             saveDB();
@@ -937,6 +1044,13 @@ export const server = http.createServer(async (req, res) => {
     const authority = url.searchParams.get('Authority') || url.searchParams.get('authority');
     const status = url.searchParams.get('Status') || url.searchParams.get('status');
 
+    const intent = authority ? commerceRepo.getPaymentIntent(db, authority) : null;
+    if (intent && (intent.state === 'settled' || intent.state === 'verifying')) {
+      res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'این پرداخت در حال پردازش یا قبلاً تکمیل شده است.' }));
+      return;
+    }
+
     if (!authority || !DB.pendingPayments || !DB.pendingPayments[authority]) {
       res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, message: 'شناسه پرداخت نامعتبر است یا یافت نشد.' }));
@@ -952,9 +1066,11 @@ export const server = http.createServer(async (req, res) => {
 
     // Synchronously set state to prevent double-credit race
     pending.state = 'verifying';
+    commerceRepo.setPaymentIntentState(db, authority, 'verifying');
 
     if (String(status || '').toUpperCase() !== 'OK') {
       pending.state = 'failed';
+      commerceRepo.setPaymentIntentState(db, authority, 'failed');
       saveDB();
       res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end('<h1 style="direction:rtl;text-align:center;font-family:tahoma;">پرداخت ناموفق یا لغو شد.</h1>');
@@ -962,7 +1078,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const { userId, courseId, amount } = pending;
-    const allowDemo = process.env.ALLOW_DEMO_PAYMENTS === '1' && process.env.NODE_ENV !== 'production';
+    const allowDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
 
     let verified = false;
     let alreadyProcessed = false;
@@ -970,9 +1086,10 @@ export const server = http.createServer(async (req, res) => {
     if (allowDemo) {
       verified = true;
     } else {
-      const merchantId = process.env.MERCHANT_ID?.trim() || '';
+      const merchantId = (process.env.MERCHANT_ID || config.merchantId || '').trim();
       if (!merchantId || merchantId.startsWith('YOUR_') || merchantId.toLowerCase() === 'demo') {
         pending.state = 'failed';
+        commerceRepo.setPaymentIntentState(db, authority, 'failed');
         saveDB();
         res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, code: 'GATEWAY_UNAVAILABLE', message: 'درگاه پرداخت پیکربندی نشده است.' }));
@@ -980,7 +1097,7 @@ export const server = http.createServer(async (req, res) => {
       }
 
       try {
-        const zarinpalBase = process.env.ZARINPAL_BASE?.trim() || 'https://api.zarinpal.com';
+        const zarinpalBase = (process.env.ZARINPAL_BASE || config.zarinpalBase || 'https://api.zarinpal.com').replace(/\/+$/, '');
         const vRes = await fetch(`${zarinpalBase}/pg/v4/payment/verify.json`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -999,6 +1116,7 @@ export const server = http.createServer(async (req, res) => {
 
     if (alreadyProcessed) {
       pending.state = 'done';
+      commerceRepo.setPaymentIntentState(db, authority, 'settled');
       saveDB();
       const redirect = `${process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
       res.writeHead(302, { Location: redirect });
@@ -1008,14 +1126,15 @@ export const server = http.createServer(async (req, res) => {
 
     if (verified) {
       pending.state = 'done';
-      await recordCourseSale(userId, courseId);
-      delete DB.pendingPayments[authority];
+      commerceRepo.setPaymentIntentState(db, authority, 'settled');
+      await recordCourseSale(userId, courseId, authority);
       saveDB();
       const redirect = `${process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
       res.writeHead(302, { Location: redirect });
       res.end();
     } else {
       pending.state = 'failed';
+      commerceRepo.setPaymentIntentState(db, authority, 'failed');
       saveDB();
       res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end('<h1 style="direction:rtl;text-align:center;font-family:tahoma;">تایید پرداخت ناموفق بود.</h1>');
@@ -1049,38 +1168,32 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        // Reject if pending payout already exists
-        const hasPending = Object.values(DB.payoutRequests || {}).some(
-          (p) => String(p.creatorId) === creatorId && p.status === 'pending'
-        );
-        if (hasPending) {
+        const stats = commerceRepo.getCreatorStats(db, creatorId);
+        const inMemBal = Number(DB.creatorEarnings[creatorId]?.balanceToman);
+        const balance = Number.isFinite(inMemBal) && inMemBal > stats.balanceToman ? inMemBal : stats.balanceToman;
+        const reqAmount = amount !== undefined ? Number(amount) : balance;
+
+        const payoutId = `payout_${crypto.randomUUID()}`;
+        const pRes = commerceRepo.requestPayout(db, {
+          creatorId,
+          sheba: cleanSheba,
+          amountToman: reqAmount,
+          payoutId
+        });
+
+        if (!pRes.ok) {
+          const msg = pRes.reason === 'pending_exists'
+            ? 'شما در حال حاضر یک درخواست تسویه در صف بررسی دارید.'
+            : `مبلغ تسویه نامعتبر است. موجودی قابل تسویه: ${balance.toLocaleString('fa-IR')} تومان.`;
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: false, message: 'شما در حال حاضر یک درخواست تسویه در صف بررسی دارید.' }));
+          res.end(JSON.stringify({ ok: false, message: msg }));
           return;
         }
 
         DB.creatorSheba = DB.creatorSheba || {};
         DB.creatorSheba[creatorId] = cleanSheba;
 
-        if (!DB.creatorEarnings[creatorId]) {
-          DB.creatorEarnings[creatorId] = { balanceToman: 0, heldToman: 0, salesCount: 0, history: [] };
-        }
-        const stats = DB.creatorEarnings[creatorId];
-        const balance = Number(stats.balanceToman || 0);
-        const reqAmount = amount !== undefined ? Number(amount) : balance;
-
-        if (!Number.isFinite(reqAmount) || reqAmount <= 0 || reqAmount > balance) {
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: false, message: `مبلغ تسویه نامعتبر است. موجودی قابل تسویه: ${balance.toLocaleString('fa-IR')} تومان.` }));
-          return;
-        }
-
-        // Reserve funds immediately
-        stats.balanceToman = balance - reqAmount;
-        stats.heldToman = (stats.heldToman || 0) + reqAmount;
-
         DB.payoutRequests = DB.payoutRequests || {};
-        const payoutId = `payout_${crypto.randomUUID()}`;
         DB.payoutRequests[payoutId] = {
           payoutId,
           creatorId,
@@ -1089,9 +1202,14 @@ export const server = http.createServer(async (req, res) => {
           status: 'pending',
           createdAt: Date.now()
         };
+
+        if (DB.creatorEarnings[creatorId]) {
+          DB.creatorEarnings[creatorId].balanceToman = pRes.balance;
+          DB.creatorEarnings[creatorId].heldToman = (DB.creatorEarnings[creatorId].heldToman || 0) + reqAmount;
+        }
         saveDB();
 
-        const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
+        const adminChatId = config.adminChatId || process.env.ADMIN_CHAT_ID?.trim();
         if (adminChatId) {
           await notifyTelegram(
             adminChatId,
@@ -1159,11 +1277,10 @@ export const server = http.createServer(async (req, res) => {
 const isDirectRun = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === __filename;
 
 if (isDirectRun) {
-  const botToken = process.env.BOT_TOKEN?.trim();
-  if (process.env.NODE_ENV === 'production' && !botToken) {
-    console.error('❌ خطا: متغیر BOT_TOKEN در محیط تولید الزامی است.');
-    process.exit(1);
-  }
+  validateConfigOrExit();
+  probeGeminiModel().catch(() => {});
+
+  const botToken = process.env.BOT_TOKEN?.trim() || config.botToken;
 
   server.listen(PORT, () => {
     console.log(`🚀 سرور جزوه زنده، درگاه امن جزوات و سپر ضداسپم روی پورت http://localhost:${PORT} فعال شد!`);
