@@ -22,6 +22,11 @@ function getApiBase() {
   return '';
 }
 
+// Helper: Safely retrieve Telegram WebApp initData string
+function getTelegramInitData() {
+  return window.Telegram?.WebApp?.initData || window.TMA?.tg?.initData || '';
+}
+
 // Sanitize JSON control characters (\f, \t, \b) & render KaTeX safely
 function sanitizeLatex(str) {
   if (!str) return '';
@@ -114,7 +119,7 @@ async function loadCourseData(courseSlug) {
   try {
     // ۱. دریافت داده‌ها از API سرور همراه با بررسی وضعیت خرید Pro
     const apiRes = await fetch(`${apiBase}/api/course?id=${encodeURIComponent(courseSlug)}`, {
-      headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
+      headers: { 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' }
     });
     if (!apiRes.ok) throw new Error('API course load failed');
     const payload = await apiRes.json();
@@ -172,7 +177,7 @@ async function syncStudyProgress() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.TMA.tg?.initData || ''
+        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
       },
       body: JSON.stringify(payload),
       keepalive: true
@@ -188,7 +193,7 @@ async function fetchCatalog() {
   const apiBase = getApiBase();
   try {
     const res = await fetch(`${apiBase}/api/courses`, {
-      headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
+      headers: { 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' }
     });
     if (!res.ok) throw new Error('Catalog fetch failed');
     const data = await res.json();
@@ -234,7 +239,7 @@ async function fetchCreatorStats() {
   const apiBase = getApiBase();
   try {
     const res = await fetch(`${apiBase}/api/creator-stats`, {
-      headers: { 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' }
+      headers: { 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' }
     });
     if (res.ok) {
       const data = await res.json();
@@ -690,7 +695,7 @@ window.sendContextualPrompt = async function (presetKey, customText) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.TMA.tg?.initData || ''
+        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
       },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
@@ -770,7 +775,7 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.TMA.tg?.initData || ''
+        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
       },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
@@ -974,12 +979,6 @@ window.simulateUnlockPurchase = async function (methodName) {
     isProUnlocked: true
   });
 
-  const apiBase = getApiBase();
-  try {
-    // ثبت خرید آزمایشی و اختصاص ۷۰٪ سهم به جزوه‌نویس
-    await fetch(`${apiBase}/api/course?id=${encodeURIComponent(AppState.currentCourseSlug)}&simulate_buy=1`);
-  } catch (_) {}
-
   closePaywallModal();
   renderHeader();
   renderFlashcardView();
@@ -1037,7 +1036,7 @@ window.submitVerifiedReport = async function () {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.TMA.tg?.initData || ''
+        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
       },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
@@ -1131,7 +1130,7 @@ window.sendExamImageToSolver = async function (imageBase64) {
   try {
     const res = await fetch(`${apiBase}/api/ask-tutor`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' },
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
         contextText: AppState.course?.title || '',
@@ -1173,7 +1172,7 @@ window.startOnlinePayment = async function () {
   try {
     const res = await fetch(`${apiBase}/api/payment/create`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.TMA.tg?.initData || '' },
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' },
       body: JSON.stringify({ courseId: AppState.currentCourseSlug })
     });
     const data = await res.json().catch(() => null);

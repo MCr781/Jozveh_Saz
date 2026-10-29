@@ -1,5 +1,7 @@
 window.TMA = {
-  tg: window.Telegram?.WebApp || null,
+  get tg() {
+    return window.Telegram?.WebApp || null;
+  },
 
   initApp() {
     if (this.tg) {

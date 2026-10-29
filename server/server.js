@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { isValidSheba } from './sheba.js';
 import { startTelegramBotPolling } from './bot.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,6 +13,9 @@ const __dirname = path.dirname(__filename);
 export { loadEnvFile, getEnv } from './env.js';
 
 export const PORT = Number(process.env.PORT?.trim()) || 3000;
+
+export const DEFAULT_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MAX_AGE_SEC?.trim()) || 86400;
+export const MONEY_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MONEY_MAX_AGE_SEC?.trim()) || 3600;
 
 export function getGeminiKeys() {
   return [
@@ -61,11 +65,13 @@ export let DB = {
   userSpamStats: {},    // { userId: { lastReportAt, dailyCount, dayStamp, rejectedStrikes, bonusQuota, usedAiQueries, lastChatAt } }
   pendingReports: {},   // { reportId: { courseId, itemId, userId, claim, proposedFix, learnedRule, status } }
   reportedItemsLock: {}, // { "courseId_itemId": true }
-  creatorEarnings: {},   // { creator_telegram_id: { balanceToman, salesCount, history: [] } }
+  creatorEarnings: {},   // { creator_telegram_id: { balanceToman, heldToman, salesCount, history: [] } }
   userStudyProgress: {}, // { userId: { reviewCount, lastSyncAt } }
-  pendingPayments: {},   // { authority: { userId, courseId, amount, createdAt } }
+  pendingPayments: {},   // { authority: { userId, courseId, amount, state, createdAt } }
   creatorSheba: {},      // { creatorId: "IR..." }
-  payoutRequests: {}     // { payoutId: { creatorId, sheba, amount, status, createdAt } }
+  payoutRequests: {},    // { payoutId: { payoutId, creatorId, sheba, amount, status, createdAt } }
+  receipts: {},          // { receiptId: { receiptId, userId, courseId, status, createdAt } }
+  userPendingCourseSelection: {} // { chatId: courseSlug }
 };
 
 if (fs.existsSync(DB_PATH)) {
@@ -80,6 +86,8 @@ if (fs.existsSync(DB_PATH)) {
     if (!DB.pendingPayments) DB.pendingPayments = {};
     if (!DB.creatorSheba) DB.creatorSheba = {};
     if (!DB.payoutRequests) DB.payoutRequests = {};
+    if (!DB.receipts) DB.receipts = {};
+    if (!DB.userPendingCourseSelection) DB.userPendingCourseSelection = {};
   } catch (_) {}
 }
 
@@ -138,6 +146,7 @@ export async function recordCourseSale(buyerUserId, courseSlugOrId) {
   if (!DB.creatorEarnings[creatorId]) {
     DB.creatorEarnings[creatorId] = {
       balanceToman: 0,
+      heldToman: 0,
       salesCount: 0,
       history: []
     };
@@ -202,30 +211,59 @@ export function getUserStats(userId) {
   return st;
 }
 
-// ۱. اعتبارسنجی رمزنگاری‌شده امضای تلگرام (HMAC-SHA256)
-export function verifyTelegramInitData(initDataRaw) {
+// کمکی: استخراج داده‌های خام احراز هویت تلگرام از هدرها
+export function getRawInitData(req) {
+  const header = req.headers['x-telegram-init-data'] || req.headers['authorization'] || '';
+  if (typeof header !== 'string') return '';
+  if (header.startsWith('tma ')) return header.slice(4).trim();
+  if (header.startsWith('Bearer ')) return header.slice(7).trim();
+  return header.trim();
+}
+
+const codeUnitCompare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+// ۱. اعتبارسنجی دقیق رمزنگاری‌شده امضای تلگرام (HMAC-SHA256) بر اساس tg_auth.js
+export function verifyTelegramInitData(initDataRaw, { maxAgeSec = DEFAULT_INITDATA_MAX_AGE_SEC, nowMs = Date.now() } = {}) {
   const botToken = process.env.BOT_TOKEN?.trim();
-  if (!botToken) return { valid: true, user: { id: 'demo_user_981024', username: 'UT_Student_Demo' } };
-  if (!initDataRaw) return { valid: false };
+  if (!botToken) return { valid: false, ok: false, reason: 'server_misconfigured' };
+  if (typeof initDataRaw !== 'string' || initDataRaw.length === 0 || initDataRaw.length > 4096) {
+    return { valid: false, ok: false, reason: 'missing' };
+  }
 
   try {
     const params = new URLSearchParams(initDataRaw);
-    const hash = params.get('hash');
-    params.delete('hash');
+    const hash = params.get('hash') || '';
+    if (!/^[0-9a-f]{64}$/.test(hash)) return { valid: false, ok: false, reason: 'bad_hash_format' };
+    params.delete('hash'); // NOTE: `signature` stays in data-check string
 
     const dataCheckString = [...params.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => codeUnitCompare(a, b))
       .map(([k, v]) => `${k}=${v}`)
       .join('\n');
 
     const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
-    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    const expected = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest();
+    const given = Buffer.from(hash, 'hex');
 
-    if (calculatedHash !== hash) return { valid: false };
-    const user = JSON.parse(params.get('user') || '{}');
-    return { valid: true, user };
+    if (given.length !== expected.length || !crypto.timingSafeEqual(expected, given)) {
+      return { valid: false, ok: false, reason: 'bad_signature' };
+    }
+
+    const authDate = Number(params.get('auth_date'));
+    if (!Number.isInteger(authDate)) return { valid: false, ok: false, reason: 'no_auth_date' };
+    const ageSec = Math.floor(nowMs / 1000) - authDate;
+    if (ageSec > maxAgeSec) return { valid: false, ok: false, reason: 'expired' };
+    if (ageSec < -60) return { valid: false, ok: false, reason: 'from_future' };
+
+    let user;
+    try { user = JSON.parse(params.get('user') || ''); } catch { return { valid: false, ok: false, reason: 'bad_user' }; }
+    if (!user || typeof user !== 'object' || !Number.isSafeInteger(user?.id) || user.id <= 0) {
+      return { valid: false, ok: false, reason: 'bad_user' };
+    }
+
+    return { valid: true, ok: true, user, authDate, startParam: params.get('start_param') || null };
   } catch (_) {
-    return { valid: false };
+    return { valid: false, ok: false, reason: 'malformed' };
   }
 }
 
@@ -373,8 +411,14 @@ export const server = http.createServer(async (req, res) => {
 
   // ۱. کاتالوگ چنددرسی امن (Multi-Course Catalog)
   if (req.method === 'GET' && url.pathname === '/api/courses') {
-    const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
-    const userId = auth.valid ? auth.user.id : 'guest';
+    const rawAuth = getRawInitData(req);
+    let userId = null;
+    if (rawAuth) {
+      const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+      if (auth.valid) {
+        userId = String(auth.user.id);
+      }
+    }
 
     const dataDir = path.join(__dirname, '../public/data');
     if (!fs.existsSync(dataDir)) {
@@ -391,7 +435,7 @@ export const server = http.createServer(async (req, res) => {
         const fullPath = path.join(dataDir, file);
         const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
         const slug = path.basename(file, '.json');
-        const isPurchased = Boolean(DB.purchases[`${userId}_${data.id}`]);
+        const isPurchased = userId ? Boolean(DB.purchases[`${userId}_${data.id}`]) : false;
 
         catalog.push({
           id: data.id,
@@ -417,23 +461,35 @@ export const server = http.createServer(async (req, res) => {
 
   // ۲. آمار درآمد و فروش ۷۰٪ جزوه‌نویس
   if (req.method === 'GET' && url.pathname === '/api/creator-stats') {
-    const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
-    const userId = auth.valid ? String(auth.user.id) : 'guest';
-    const creatorId = url.searchParams.get('creator_id') || userId;
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: MONEY_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
 
-    const stats = DB.creatorEarnings[creatorId] || DB.creatorEarnings[userId] || DB.creatorEarnings['creator_demo_1'] || {
+    const userId = String(auth.user.id);
+    const stats = DB.creatorEarnings[userId] || {
       balanceToman: 0,
+      heldToman: 0,
       salesCount: 0,
       history: []
     };
 
+    const sanitizedHistory = (stats.history || []).map((h) => {
+      const { buyerUserId, ...rest } = h;
+      return rest;
+    });
+
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       ok: true,
-      creatorId,
+      creatorId: userId,
       balanceToman: stats.balanceToman || 0,
+      heldToman: stats.heldToman || 0,
       salesCount: stats.salesCount || 0,
-      history: stats.history || []
+      history: sanitizedHistory
     }));
     return;
   }
@@ -449,13 +505,22 @@ export const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
-    const userId = auth.valid ? auth.user.id : 'guest';
-    const rawCourse = found.data;
+    const rawAuth = getRawInitData(req);
+    let userId = null;
+    if (rawAuth) {
+      const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+      if (!auth.valid) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+        return;
+      }
+      userId = String(auth.user.id);
+    }
 
-    const isPurchased = Boolean(DB.purchases[`${userId}_${rawCourse.id}`]);
-    const st = getUserStats(userId);
-    const maxQuota = isPurchased ? (rawCourse.ai_quota_pro || 100) : (rawCourse.ai_quota_free || 3) + (st.bonusQuota || 0);
+    const rawCourse = found.data;
+    const isPurchased = userId ? Boolean(DB.purchases[`${userId}_${rawCourse.id}`]) : false;
+    const st = userId ? getUserStats(userId) : { bonusQuota: 0, usedAiQueries: 0 };
+    const maxQuota = isPurchased ? (rawCourse.ai_quota_pro || 100) : (userId ? (rawCourse.ai_quota_free || 3) + (st.bonusQuota || 0) : 0);
     const remainingAiQuota = Math.max(0, maxQuota - (st.usedAiQueries || 0));
 
     const safePayload = isPurchased ? rawCourse : stripLockedContentForFreeUser(rawCourse);
@@ -477,16 +542,17 @@ export const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
     req.on('end', () => {
       try {
-        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
-          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
           return;
         }
 
         const userId = String(auth.user?.id || '').trim();
         if (!userId) {
-          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'شناسه کاربر تلگرام نامعتبر است.' }));
           return;
         }
@@ -604,15 +670,16 @@ export const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { if (body.length < 1024 * 1024) body += chunk; });
     req.on('end', async () => {
       try {
-        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
-          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
           return;
         }
 
         const { courseId, contextText, question, presetKey, imageBase64 } = JSON.parse(body || '{}');
-        const userId = auth.user.id || 'guest';
+        const userId = String(auth.user.id);
         const st = getUserStats(userId);
 
         // ضداسپم چت: حداقل ۴ ثانیه فاصله بین هر پیام
@@ -697,9 +764,10 @@ export const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { if (body.length < 4096) body += chunk; });
     req.on('end', async () => {
       try {
-        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
-          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
           return;
         }
@@ -714,7 +782,7 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const itemKey = `${courseId}_${itemId}`;
-        const spamCheck = checkSpamShield(auth.user.id, itemKey);
+        const spamCheck = checkSpamShield(String(auth.user.id), itemKey);
         if (!spamCheck.allowed) {
           res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: spamCheck.reason }));
@@ -742,7 +810,7 @@ export const server = http.createServer(async (req, res) => {
         DB.pendingReports[reportId] = {
           courseId,
           itemId,
-          userId: auth.user.id,
+          userId: String(auth.user.id),
           claim: cleanClaim,
           proposedFix: verdict.corrected_text,
           learnedRule: verdict.general_rule_for_memory,
@@ -786,45 +854,65 @@ export const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
     req.on('end', async () => {
       try {
-        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
-          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
           return;
         }
-        const userId = auth.user.id;
-        const { courseId, amount } = JSON.parse(body || '{}');
-        const cid = courseId || 'sample_course';
-        const found = findCourseFile(cid);
-        const price = amount || found?.data?.price_toman || 59000;
-        const courseTitle = found?.data?.title || 'پکیج شب امتحان';
-
-        const merchantId = process.env.MERCHANT_ID?.trim() || '';
-        function isDemoMerchant() {
-          const m = merchantId;
-          return !m || m.startsWith('YOUR_') || m.toLowerCase() === 'demo' || m === 'demo';
+        const userId = String(auth.user.id);
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch (_) {}
+        const { courseId } = parsed;
+        const found = findCourseFile(courseId);
+        if (!found) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'جزوه مورد نظر یافت نشد.' }));
+          return;
         }
 
-        if (isDemoMerchant()) {
-          await recordCourseSale(userId, cid);
+        const cid = found.data?.id || found.slug;
+        const price = found.data?.price_toman || 59000;
+        const courseTitle = found.data?.title || 'پکیج شب امتحان';
+
+        const allowDemo = process.env.ALLOW_DEMO_PAYMENTS === '1' && process.env.NODE_ENV !== 'production';
+        if (allowDemo) {
+          const authority = `DEMO_${crypto.randomUUID()}`;
+          DB.pendingPayments = DB.pendingPayments || {};
+          DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, state: 'pending', createdAt: Date.now() };
+          saveDB();
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: true, simulated: true, message: 'پرداخت آزمایشی تایید شد و قفل باز شد.' }));
+          res.end(JSON.stringify({ ok: true, simulated: true, authority, message: 'پرداخت دمو ایجاد شد.' }));
+          return;
+        }
+
+        const merchantId = process.env.MERCHANT_ID?.trim() || '';
+        if (!merchantId || merchantId.startsWith('YOUR_') || merchantId.toLowerCase() === 'demo') {
+          res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, code: 'GATEWAY_UNAVAILABLE', message: 'درگاه پرداخت پیکربندی نشده است.' }));
           return;
         }
 
         const callbackBase = process.env.PAYMENT_CALLBACK_BASE?.trim() || process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`;
-        const callbackUrl = `${callbackBase}/api/payment/verify?courseId=${encodeURIComponent(cid)}`;
+        const callbackUrl = `${callbackBase}/api/payment/verify`;
         try {
-          const zRes = await fetch('https://api.zarinpal.com/pg/v4/payment/request.json', {
+          const zarinpalBase = process.env.ZARINPAL_BASE?.trim() || 'https://api.zarinpal.com';
+          const zRes = await fetch(`${zarinpalBase}/pg/v4/payment/request.json`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ merchant_id: merchantId, amount: price * 10, callback_url: callbackUrl, description: `خرید ${courseTitle}` })
+            body: JSON.stringify({
+              merchant_id: merchantId,
+              amount: price * 10,
+              callback_url: callbackUrl,
+              description: `خرید ${courseTitle}`
+            })
           });
           const zData = await zRes.json().catch(() => null);
           if (zData?.data?.code === 100 && zData?.data?.authority) {
             const authority = zData.data.authority;
             DB.pendingPayments = DB.pendingPayments || {};
-            DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, createdAt: Date.now() };
+            DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, state: 'pending', createdAt: Date.now() };
             saveDB();
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify({ ok: true, authority, paymentUrl: `https://www.zarinpal.com/pg/StartPay/${authority}` }));
@@ -834,9 +922,8 @@ export const server = http.createServer(async (req, res) => {
           console.error('Zarinpal request error:', err.message);
         }
 
-        await recordCourseSale(userId, cid);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, simulated: true, message: 'درگاه در دسترس نبود؛ پرداخت آزمایشی انجام شد.' }));
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, code: 'GATEWAY_UNAVAILABLE', message: 'درگاه در دسترس نیست.' }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در ایجاد پرداخت.' }));
@@ -849,52 +936,88 @@ export const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/payment/verify') {
     const authority = url.searchParams.get('Authority') || url.searchParams.get('authority');
     const status = url.searchParams.get('Status') || url.searchParams.get('status');
-    const courseIdParam = url.searchParams.get('courseId');
-    const pending = authority ? (DB.pendingPayments || {})[authority] : null;
-    const userId = pending?.userId || 'guest';
-    const courseId = pending?.courseId || courseIdParam || 'sample_course';
-    const amount = pending?.amount || 59000;
 
-    const merchantId = process.env.MERCHANT_ID?.trim() || '';
-    function isDemoMerchant() {
-      const m = merchantId;
-      return !m || m.startsWith('YOUR_') || m.toLowerCase() === 'demo' || m === 'demo';
+    if (!authority || !DB.pendingPayments || !DB.pendingPayments[authority]) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'شناسه پرداخت نامعتبر است یا یافت نشد.' }));
+      return;
     }
 
-    if (status && String(status).toUpperCase() !== 'OK') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    const pending = DB.pendingPayments[authority];
+    if (pending.state === 'verifying' || pending.state === 'done') {
+      res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'این پرداخت در حال پردازش یا قبلاً تکمیل شده است.' }));
+      return;
+    }
+
+    // Synchronously set state to prevent double-credit race
+    pending.state = 'verifying';
+
+    if (String(status || '').toUpperCase() !== 'OK') {
+      pending.state = 'failed';
+      saveDB();
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end('<h1 style="direction:rtl;text-align:center;font-family:tahoma;">پرداخت ناموفق یا لغو شد.</h1>');
       return;
     }
 
-    let ok = isDemoMerchant();
-    if (!ok && merchantId && authority) {
+    const { userId, courseId, amount } = pending;
+    const allowDemo = process.env.ALLOW_DEMO_PAYMENTS === '1' && process.env.NODE_ENV !== 'production';
+
+    let verified = false;
+    let alreadyProcessed = false;
+
+    if (allowDemo) {
+      verified = true;
+    } else {
+      const merchantId = process.env.MERCHANT_ID?.trim() || '';
+      if (!merchantId || merchantId.startsWith('YOUR_') || merchantId.toLowerCase() === 'demo') {
+        pending.state = 'failed';
+        saveDB();
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, code: 'GATEWAY_UNAVAILABLE', message: 'درگاه پرداخت پیکربندی نشده است.' }));
+        return;
+      }
+
       try {
-        const vRes = await fetch('https://api.zarinpal.com/pg/v4/payment/verify.json', {
+        const zarinpalBase = process.env.ZARINPAL_BASE?.trim() || 'https://api.zarinpal.com';
+        const vRes = await fetch(`${zarinpalBase}/pg/v4/payment/verify.json`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ merchant_id: merchantId, amount: amount * 10, authority })
         });
         const vData = await vRes.json().catch(() => null);
-        if (vData?.data?.code === 100 || vData?.data?.code === 101) ok = true;
+        if (vData?.data?.code === 100) {
+          verified = true;
+        } else if (vData?.data?.code === 101) {
+          alreadyProcessed = true;
+        }
       } catch (err) {
         console.error('Zarinpal verify error:', err.message);
       }
-    } else {
-      ok = true;
     }
 
-    if (ok) {
+    if (alreadyProcessed) {
+      pending.state = 'done';
+      saveDB();
+      const redirect = `${process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
+      res.writeHead(302, { Location: redirect });
+      res.end();
+      return;
+    }
+
+    if (verified) {
+      pending.state = 'done';
       await recordCourseSale(userId, courseId);
-      if (authority && DB.pendingPayments && DB.pendingPayments[authority]) {
-        delete DB.pendingPayments[authority];
-        saveDB();
-      }
+      delete DB.pendingPayments[authority];
+      saveDB();
       const redirect = `${process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
       res.writeHead(302, { Location: redirect });
       res.end();
     } else {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      pending.state = 'failed';
+      saveDB();
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end('<h1 style="direction:rtl;text-align:center;font-family:tahoma;">تایید پرداخت ناموفق بود.</h1>');
     }
     return;
@@ -906,37 +1029,61 @@ export const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
     req.on('end', async () => {
       try {
-        const auth = verifyTelegramInitData(req.headers['x-telegram-init-data']);
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: MONEY_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
-          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
           return;
         }
-        const userId = auth.user.id;
-        const { sheba, amount, creatorId } = JSON.parse(body || '{}');
-        const targetCreator = creatorId || userId;
+
+        const creatorId = String(auth.user.id);
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch (_) {}
+        const { sheba, amount } = parsed;
+
         const cleanSheba = String(sheba || '').trim().toUpperCase();
-        if (!/^IR[0-9]{24}$/.test(cleanSheba)) {
+        if (!isValidSheba(cleanSheba)) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: false, message: 'شماره شبا نامعتبر است. فرمت صحیح: IR + 24 رقم.' }));
+          res.end(JSON.stringify({ ok: false, message: 'شماره شبا نامعتبر است (کنترل رقم شبا نادرست است).' }));
           return;
         }
-        DB.creatorSheba = DB.creatorSheba || {};
-        DB.creatorSheba[targetCreator] = cleanSheba;
 
-        const stats = DB.creatorEarnings[targetCreator] || { balanceToman: 0, salesCount: 0, history: [] };
+        // Reject if pending payout already exists
+        const hasPending = Object.values(DB.payoutRequests || {}).some(
+          (p) => String(p.creatorId) === creatorId && p.status === 'pending'
+        );
+        if (hasPending) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'شما در حال حاضر یک درخواست تسویه در صف بررسی دارید.' }));
+          return;
+        }
+
+        DB.creatorSheba = DB.creatorSheba || {};
+        DB.creatorSheba[creatorId] = cleanSheba;
+
+        if (!DB.creatorEarnings[creatorId]) {
+          DB.creatorEarnings[creatorId] = { balanceToman: 0, heldToman: 0, salesCount: 0, history: [] };
+        }
+        const stats = DB.creatorEarnings[creatorId];
         const balance = Number(stats.balanceToman || 0);
-        const reqAmount = amount ? Number(amount) : balance;
-        if (!reqAmount || reqAmount <= 0 || reqAmount > balance) {
+        const reqAmount = amount !== undefined ? Number(amount) : balance;
+
+        if (!Number.isFinite(reqAmount) || reqAmount <= 0 || reqAmount > balance) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: `مبلغ تسویه نامعتبر است. موجودی قابل تسویه: ${balance.toLocaleString('fa-IR')} تومان.` }));
           return;
         }
 
+        // Reserve funds immediately
+        stats.balanceToman = balance - reqAmount;
+        stats.heldToman = (stats.heldToman || 0) + reqAmount;
+
         DB.payoutRequests = DB.payoutRequests || {};
-        const payoutId = `payout_${Date.now()}`;
+        const payoutId = `payout_${crypto.randomUUID()}`;
         DB.payoutRequests[payoutId] = {
-          creatorId: targetCreator,
+          payoutId,
+          creatorId,
           sheba: cleanSheba,
           amount: reqAmount,
           status: 'pending',
@@ -948,7 +1095,7 @@ export const server = http.createServer(async (req, res) => {
         if (adminChatId) {
           await notifyTelegram(
             adminChatId,
-            `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${targetCreator}\n🏦 ${cleanSheba}\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
+            `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 <code>${creatorId}</code>\n🏦 <code>${cleanSheba}</code>\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
             [[
               { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
               { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
@@ -1012,9 +1159,14 @@ export const server = http.createServer(async (req, res) => {
 const isDirectRun = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === __filename;
 
 if (isDirectRun) {
+  const botToken = process.env.BOT_TOKEN?.trim();
+  if (process.env.NODE_ENV === 'production' && !botToken) {
+    console.error('❌ خطا: متغیر BOT_TOKEN در محیط تولید الزامی است.');
+    process.exit(1);
+  }
+
   server.listen(PORT, () => {
     console.log(`🚀 سرور جزوه زنده، درگاه امن جزوات و سپر ضداسپم روی پورت http://localhost:${PORT} فعال شد!`);
-    const botToken = process.env.BOT_TOKEN?.trim();
     if (botToken) {
       startTelegramBotPolling();
     } else {

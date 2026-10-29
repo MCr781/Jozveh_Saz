@@ -1,8 +1,10 @@
 import './env.js';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { DB, saveDB, getUserStats, notifyTelegram, recordCourseSale, findCourseFile } from './server.js';
+import { isValidSheba } from './sheba.js';
 import { generateCoursePackage } from '../factory/generate.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -331,8 +333,30 @@ async function handleUpdate(update) {
     }
 
     // ج) تایید تک‌کلیکی رسید کارت‌به‌کارت دانشجو و واریز ۷۰٪ سهم جزوه‌نویس
-    if (data.startsWith('unlock_')) {
-      const [, targetUserId, courseId] = data.split('|');
+    if (data.startsWith('unlock|') || data.startsWith('unlock_')) {
+      let targetUserId, courseId, receiptId = null;
+      if (data.startsWith('unlock|')) {
+        receiptId = data.slice('unlock|'.length);
+        const receipt = (DB.receipts || {})[receiptId];
+        if (!receipt || receipt.status !== 'pending') {
+          await tgApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: '⚠️ این رسید قبلاً بررسی شده یا نامعتبر است.'
+          });
+          return;
+        }
+        // اعتبارسنجی و قفل حالت قبل از هرگونه await ناهمگام
+        receipt.status = 'approved';
+        receipt.approvedAt = Date.now();
+        saveDB();
+        targetUserId = receipt.userId;
+        courseId = receipt.courseId;
+      } else {
+        const parts = data.split('|');
+        targetUserId = parts[1];
+        courseId = parts[2];
+      }
+
       const finalCourseId = courseId || 'sample_course';
       const saleResult = await recordCourseSale(targetUserId, finalCourseId);
 
@@ -347,15 +371,21 @@ async function handleUpdate(update) {
         [[{ text: '🚀 ورود به نسخه کامل جزوه زنده', web_app: { url: `${webappUrl}/?course=${finalCourseId}` } }]]
       );
     }
+
     // د) تایید تسویه حساب جزوه‌نویس (پرداخت سهم ۷۰٪)
     if (data.startsWith('approve_payout_')) {
       const payoutId = data.replace('approve_payout_', '');
       const pr = (DB.payoutRequests || {})[payoutId];
-      if (!pr || pr.status !== 'pending') return;
+      if (!pr || pr.status !== 'pending') {
+        await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '⚠️ این تسویه قبلاً بررسی شده است.' });
+        return;
+      }
+      // اعتبارسنجی و قفل حالت قبل از هرگونه await ناهمگام
       pr.status = 'approved';
+      pr.approvedAt = Date.now();
       const stats = DB.creatorEarnings[pr.creatorId];
       if (stats) {
-        stats.balanceToman = Math.max(0, (stats.balanceToman || 0) - pr.amount);
+        stats.heldToman = Math.max(0, (stats.heldToman || 0) - pr.amount);
         stats.history = stats.history || [];
         stats.history.push({ type: 'payout', amount: pr.amount, at: Date.now(), status: 'paid' });
       }
@@ -367,11 +397,24 @@ async function handleUpdate(update) {
     if (data.startsWith('reject_payout_')) {
       const payoutId = data.replace('reject_payout_', '');
       const pr = (DB.payoutRequests || {})[payoutId];
-      if (!pr) return;
+      if (!pr || pr.status !== 'pending') {
+        await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '⚠️ این تسویه قبلاً بررسی شده است.' });
+        return;
+      }
+      // اعتبارسنجی و قفل حالت قبل از هرگونه await ناهمگام
       pr.status = 'rejected';
+      pr.rejectedAt = Date.now();
+      const stats = DB.creatorEarnings[pr.creatorId];
+      if (stats) {
+        // آزادسازی مبلغ مسدود شده و بازگشت به موجودی
+        stats.balanceToman = (stats.balanceToman || 0) + pr.amount;
+        stats.heldToman = Math.max(0, (stats.heldToman || 0) - pr.amount);
+        stats.history = stats.history || [];
+        stats.history.push({ type: 'payout_rejected', amount: pr.amount, at: Date.now(), status: 'rejected' });
+      }
       saveDB();
-      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 تسویه رد شد.' });
-      await notifyTelegram(pr.creatorId, '🚫 <b>درخواست تسویه شما رد شد.</b> لطفاً با پشتیبانی تماس بگیرید.');
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '🚫 تسویه رد شد و موجودی بازگشت داده شد.' });
+      await notifyTelegram(pr.creatorId, '🚫 <b>درخواست تسویه شما رد شد.</b> مبلغ درخواستی به موجودی شما بازگردانده شد. لطفاً با پشتیبانی تماس بگیرید.');
     }
 
 
@@ -447,31 +490,58 @@ async function handleUpdate(update) {
   // ۳.۲ دستور /payout برای ثبت شبا و درخواست تسویه حساب جزوه‌نویسان
   if (msg.text && msg.text.startsWith('/payout')) {
     const parts = msg.text.trim().split(/\s+/);
-    const stats = DB.creatorEarnings[chatId] || { balanceToman: 0, salesCount: 0, history: [] };
+    const stats = DB.creatorEarnings[chatId] || { balanceToman: 0, heldToman: 0, salesCount: 0, history: [] };
     const balance = Number(stats.balanceToman || 0);
 
-    if (parts.length >= 2 && /^IR[0-9]{24}$/i.test(parts[1])) {
-      const sheba = parts[1].toUpperCase();
+    if (parts.length >= 2) {
+      const sheba = parts[1].trim().toUpperCase();
+      if (!isValidSheba(sheba)) {
+        await notifyTelegram(chatId, '❌ <b>شماره شبا نامعتبر است.</b>\nفرمت صحیح: IR به همراه ۲۴ رقم با رقم کنترل معتبر (ISO 13616 mod-97).');
+        return;
+      }
+
+      // رد درخواست در صورت وجود درخواست قبلی در انتظار بررسی
+      const hasPending = Object.values(DB.payoutRequests || {}).some(
+        (p) => String(p.creatorId) === chatId && p.status === 'pending'
+      );
+      if (hasPending) {
+        await notifyTelegram(chatId, '⚠️ <b>شما یک درخواست تسویه در صف بررسی دارید.</b>\nلطفاً تا تعیین تکلیف درخواست قبلی صبور باشید.');
+        return;
+      }
+
       DB.creatorSheba = DB.creatorSheba || {};
       DB.creatorSheba[chatId] = sheba;
 
       if (balance <= 0) {
-        await notifyTelegram(chatId, `🏦 شماره شبا ${sheba} ثبت شد.\nموجودی قابل تسویه شما در حال حاضر ۰ تومان است.`);
+        await notifyTelegram(chatId, `🏦 شماره شبا <code>${sheba}</code> ثبت شد.\nموجودی قابل تسویه شما در حال حاضر ۰ تومان است.`);
         saveDB();
         return;
       }
 
+      // مسدودسازی آنی موجودی جهت جلوگیری از سوءاستفاده درخواست‌های همزمان
+      stats.balanceToman = 0;
+      stats.heldToman = (stats.heldToman || 0) + balance;
+
       DB.payoutRequests = DB.payoutRequests || {};
-      const payoutId = `payout_${Date.now()}`;
-      DB.payoutRequests[payoutId] = { creatorId: chatId, sheba, amount: balance, status: 'pending', createdAt: Date.now() };
+      const payoutId = `payout_${crypto.randomUUID()}`;
+      DB.payoutRequests[payoutId] = {
+        payoutId,
+        creatorId: chatId,
+        sheba,
+        amount: balance,
+        status: 'pending',
+        createdAt: Date.now()
+      };
       saveDB();
 
-      await notifyTelegram(adminChatId, `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 ${chatId}\n🏦 ${sheba}\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
-        { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
-        { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
-      ]]);
+      if (adminChatId) {
+        await notifyTelegram(adminChatId, `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 <code>${chatId}</code>\n🏦 <code>${sheba}</code>\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
+          { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
+          { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
+        ]]);
+      }
 
-      await notifyTelegram(chatId, `✅ شماره شبا ${sheba} ثبت شد و درخواست تسویه ${balance.toLocaleString('fa-IR')} تومان برای ادمین ارسال گردید.`);
+      await notifyTelegram(chatId, `✅ شماره شبا <code>${sheba}</code> ثبت شد و درخواست تسویه ${balance.toLocaleString('fa-IR')} تومان برای ادمین ارسال گردید.`);
       return;
     }
 
@@ -487,6 +557,36 @@ async function handleUpdate(update) {
     return;
   }
 
+  // ۳.۳ دستور /pay برای انتخاب درس قبل از واریز کارت‌به‌کارت
+  if (msg.text && msg.text.startsWith('/pay')) {
+    const parts = msg.text.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      const slug = parts[1].trim();
+      const found = findCourseFile(slug);
+      const courseId = found?.data?.id || found?.slug || slug;
+      const courseTitle = found?.data?.title || courseId;
+      const price = found?.data?.price_toman || 59000;
+      DB.userPendingCourseSelection = DB.userPendingCourseSelection || {};
+      DB.userPendingCourseSelection[chatId] = courseId;
+      saveDB();
+
+      await notifyTelegram(
+        chatId,
+        `📚 درس <b>${escapeHtml(courseTitle)}</b> انتخاب شد.\n\n` +
+        `💰 مبلغ پکیج: <b>${price.toLocaleString('fa-IR')} تومان</b>\n` +
+        `لطفاً مبلغ را کارت‌به‌کارت کرده و عکس فیش واریز را همین‌جا ارسال نمایید تا قفل درس بلافاصله باز شود.`
+      );
+      return;
+    } else {
+      await notifyTelegram(
+        chatId,
+        '💡 برای خرید کارت‌به‌کارت درس، لطفاً شناسه درس را وارد کنید:\n' +
+        '<code>/pay eng_math_01</code> یا <code>/pay sample_course</code>\n\n' +
+        'یا مستقیماً از داخل مینی‌اپ روی «پرداخت آنلاین» یا «کارت به کارت» بزنید.'
+      );
+      return;
+    }
+  }
 
   // ۴. اگر ادمین فایل PDF جزوه بفرستد <- تبدیل خودکار به پکیج جزوه زنده!
   if (chatId === adminChatId && msg.document) {
@@ -520,21 +620,36 @@ async function handleUpdate(update) {
     return;
   }
 
-  // ۵. اگر دانشجو عکس رسید کارت‌به‌کارت بفرستد <- ارسال برای ادمین با دکمه تایید ۱ کلیکی
+  // ۵. اگر دانشجو عکس رسید کارت‌به‌کارت بفرستد <- ثبت سرور رسید با UUID و ارسال برای ادمین با تایید تک‌کلیکی
   if (msg.photo && chatId !== adminChatId) {
     const bestPhoto = msg.photo[msg.photo.length - 1].file_id;
+    const receiptId = crypto.randomUUID();
+    const selectedCourseId = (DB.userPendingCourseSelection || {})[chatId] || 'sample_course';
+    const found = findCourseFile(selectedCourseId);
+    const courseTitle = found?.data?.title || selectedCourseId;
+
+    DB.receipts = DB.receipts || {};
+    DB.receipts[receiptId] = {
+      receiptId,
+      userId: chatId,
+      courseId: selectedCourseId,
+      status: 'pending',
+      createdAt: Date.now()
+    };
+    saveDB();
+
     await tgApi('sendPhoto', {
       chat_id: adminChatId,
       photo: bestPhoto,
-      caption: `💳 <b>رسید کارت‌به‌کارت جدید</b>\n👤 دانشجو: <code>${chatId}</code> (@${msg.from.username || 'بدون_نام_کاربری'})`,
+      caption: `💳 <b>رسید کارت‌به‌کارت جدید</b>\n👤 دانشجو: <code>${chatId}</code> (@${msg.from.username || 'بدون_نام_کاربری'})\n📚 درس: <b>${escapeHtml(courseTitle)}</b>\n🆔 شناسه رسید: <code>${receiptId}</code>`,
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [[
-          { text: '✅ تایید و باز کردن قفل آنی', callback_data: `unlock_|${chatId}|sample_course` }
+          { text: '✅ تایید و باز کردن قفل آنی', callback_data: `unlock|${receiptId}` }
         ]]
       }
     });
-    await notifyTelegram(chatId, '⏳ تصویر رسید شما دریافت شد و برای تایید فوری ارسال گردید. ظرف چند لحظه قفل پکیج برای شما باز می‌شود.');
+    await notifyTelegram(chatId, `⏳ تصویر رسید شما برای درس «${escapeHtml(courseTitle)}» دریافت شد و برای تایید ارسال گردید. ظرف چند لحظه قفل پکیج برای شما باز می‌شود.`);
   }
 }
 
