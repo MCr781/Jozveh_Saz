@@ -34,7 +34,7 @@ export function validateConfig(env = process.env) {
       errors.push('STATE_DB_PATH must be an absolute path.');
     }
 
-    // Gemini Model: if undefined, defaults cleanly to 'gemini-2.5-flash'.
+    // Gemini Model: if undefined, defaults cleanly to 'gemini-3.8-flash'.
     // Only fails if explicitly set to empty or whitespace string.
     if (env.GEMINI_MODEL !== undefined && env.GEMINI_MODEL.trim() === '') {
       errors.push('GEMINI_MODEL cannot be empty/whitespace when specified.');
@@ -73,7 +73,7 @@ export function loadConfig(env = process.env) {
     ? (path.isAbsolute(rawStateDbPath) ? rawStateDbPath : path.resolve(process.cwd(), rawStateDbPath))
     : path.resolve(process.cwd(), 'server/jozveh.db');
 
-  const geminiModel = (env.GEMINI_MODEL || '').trim() || 'gemini-2.5-flash';
+  const geminiModel = (env.GEMINI_MODEL || '').trim() || 'gemini-3.8-flash';
   const maxAgeSec = Number((env.INITDATA_MAX_AGE_SEC || '').trim()) || 86400;
   const moneyMaxAgeSec = Number((env.INITDATA_MONEY_MAX_AGE_SEC || '').trim()) || 3600;
 

@@ -10,6 +10,7 @@ import * as reportsRepo from './repo/reports.js';
 import * as aiRepo from './repo/ai.js';
 import * as inboxRepo from './repo/inbox.js';
 import * as factoryRepo from './repo/factory.js';
+import * as growthRepo from './repo/growth.js';
 import { isValidSheba, getShebaBankName } from './sheba.js';
 import { config } from './config.js';
 import { generateCoursePackage, runQualityGate, runFactoryPipeline } from '../factory/generate.js';
@@ -198,6 +199,8 @@ export async function sendReviewReminders({ force = false, now = new Date() } = 
   let sent = 0;
 
   for (const userId of userIds) {
+    if (growthRepo.isUserBotBlocked(db, userId)) continue;
+
     const progress = DB.userStudyProgress[userId];
     if (!progress || typeof progress !== 'object' || Array.isArray(progress)) continue;
     if (!force && progress.lastReminderDate === day) continue;
@@ -206,7 +209,14 @@ export async function sendReviewReminders({ force = false, now = new Date() } = 
     if (!courses.length) continue;
 
     const payload = buildReviewReminder(userId, courses, { manual: false });
-    await notifyTelegram(userId, payload.text, payload.keyboard);
+    try {
+      await notifyTelegram(userId, payload.text, payload.keyboard);
+    } catch (err) {
+      if (err?.status === 403 || err?.statusCode === 403 || (err?.message && err.message.includes('bot was blocked'))) {
+        growthRepo.markUserBotBlocked(db, userId);
+      }
+      continue;
+    }
 
     progress.lastReminderDate = day;
     progress.lastReminderAt = Date.now();
@@ -543,6 +553,16 @@ async function processUpdate(update) {
 
   // ۲. دستور /start برای دانشجویان
   if (msg.text && msg.text.startsWith('/start')) {
+    const parts = msg.text.trim().split(/\s+/);
+    if (parts.length > 1) {
+      const param = parts[1];
+      if (param.startsWith('ref_')) {
+        try {
+          growthRepo.bindReferralIfEligible(db, { refereeId: chatId, startParam: param });
+        } catch (_) {}
+      }
+    }
+
     await notifyTelegram(
       chatId,
       '👋 <b>به «جزوه زنده» خوش آمدید!</b>\n\n' +

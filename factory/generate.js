@@ -36,37 +36,52 @@ export function getNextApiKey() {
   return apiKey;
 }
 
-export async function callGeminiRest({ contents, generationConfig, model = config.geminiModel || 'gemini-2.5-flash' }) {
+export async function callGeminiRest({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
   const maxRetries = Math.max(1, getGeminiApiKeys().length);
   let lastError = null;
 
+  async function doRequest(apiKey, targetModel) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
+      body: JSON.stringify({ contents, generationConfig })
+    });
+
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      throw new Error('پاسخی از مدل Gemini دریافت نشد.');
+    }
+
+    return text;
+  }
+
+  let activeModel = model;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const apiKey = getNextApiKey();
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify({ contents, generationConfig })
-      });
-
-      const data = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
-        throw new Error(msg);
+      try {
+        return await doRequest(apiKey, activeModel);
+      } catch (reqErr) {
+        const isModelRetired = reqErr.status === 404 || (reqErr.message && (reqErr.message.includes('no longer available') || reqErr.message.includes('not found')));
+        if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
+          console.warn(`⚠️ Model ${activeModel} unavailable (${reqErr.message}). Falling back to gemini-3.8-flash...`);
+          activeModel = 'gemini-3.8-flash';
+          return await doRequest(apiKey, activeModel);
+        }
+        throw reqErr;
       }
-
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) {
-        throw new Error('پاسخی از مدل Gemini دریافت نشد.');
-      }
-
-      return text;
     } catch (err) {
       lastError = err;
       console.warn(`[Gemini REST Attempt ${attempt + 1}] Warning: ${err.message}`);

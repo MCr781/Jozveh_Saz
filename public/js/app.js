@@ -242,13 +242,27 @@ async function syncStudyProgress() {
   };
 
   try {
-    await api('/api/sync-progress', {
+    const res = await api('/api/sync-progress', {
       method: 'POST',
       body: JSON.stringify(payload),
       keepalive: true
     });
+    if (res && res.streak !== undefined) {
+      updateStreakUI(res.streak, res.badges);
+    }
   } catch (_) {
     // آفلاین: پیشرفت در localStorage/CloudStorage باقی می‌ماند
+  }
+}
+
+function updateStreakUI(streak = 0, badges = []) {
+  const badgeEl = document.getElementById('streakBadge');
+  if (!badgeEl) return;
+  if (streak > 0) {
+    badgeEl.style.display = 'inline-block';
+    badgeEl.textContent = `🔥 ${streak} روز متوالی`;
+  } else {
+    badgeEl.style.display = 'none';
   }
 }
 
@@ -1621,10 +1635,243 @@ window.checkUrlForFactoryReview = async function () {
   } catch (_) {}
 };
 
+// ===== Milestone 10: Campus, Referrals, Panic Mode & Deep Links =====
+
+let campusOptions = null;
+
+window.openCampusModal = async function () {
+  const backdrop = document.getElementById('campusModalBackdrop');
+  if (backdrop) backdrop.classList.add('open');
+
+  if (!campusOptions) {
+    const data = await api('/api/campus/options');
+    if (data && data.ok) {
+      campusOptions = data;
+      renderCampusSelects();
+    }
+  }
+
+  const profileRes = await api('/api/campus/profile');
+  if (profileRes && profileRes.ok && profileRes.profile) {
+    const p = profileRes.profile;
+    const uniSel = document.getElementById('campusUniSelect');
+    const deptSel = document.getElementById('campusDeptSelect');
+    const termSel = document.getElementById('campusTermSelect');
+    if (uniSel && p.universityId) uniSel.value = p.universityId;
+    if (deptSel && p.departmentId) deptSel.value = p.departmentId;
+    if (termSel && p.term) termSel.value = String(p.term);
+  }
+};
+
+window.closeCampusModal = function () {
+  const backdrop = document.getElementById('campusModalBackdrop');
+  if (backdrop) backdrop.classList.remove('open');
+};
+
+function renderCampusSelects() {
+  if (!campusOptions) return;
+  const uniSel = document.getElementById('campusUniSelect');
+  const deptSel = document.getElementById('campusDeptSelect');
+
+  if (uniSel) {
+    uniSel.innerHTML = campusOptions.universities.map(u => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('');
+  }
+  if (deptSel) {
+    deptSel.innerHTML = campusOptions.departments.map(d => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
+  }
+}
+
+window.submitCampusProfileFromUi = async function () {
+  const universityId = document.getElementById('campusUniSelect')?.value;
+  const departmentId = document.getElementById('campusDeptSelect')?.value;
+  const term = Number(document.getElementById('campusTermSelect')?.value || 4);
+
+  if (!universityId || !departmentId) {
+    alert('لطفاً دانشگاه و رشته خود را انتخاب کنید.');
+    return;
+  }
+
+  try {
+    const data = await api('/api/campus/profile', {
+      method: 'POST',
+      body: JSON.stringify({ universityId, departmentId, term })
+    });
+    if (data && data.ok) {
+      alert('✅ دانشگاه و رشته شما با موفقیت ثبت شد!');
+      closeCampusModal();
+      const label = document.getElementById('campusHeaderLabel');
+      if (label) label.textContent = 'دانشکده من';
+      await fetchCatalog();
+    } else {
+      alert(data?.message || 'خطا در ثبت مشخصات.');
+    }
+  } catch (err) {
+    alert(err?.message || 'خطا در ثبت مشخصات دانشگاهی.');
+  }
+};
+
+window.openReferralModal = async function () {
+  const backdrop = document.getElementById('referralModalBackdrop');
+  if (backdrop) backdrop.classList.add('open');
+  const input = document.getElementById('referralShareInput');
+  if (input) input.value = 'در حال تولید لینک دعوت... ⏳';
+
+  try {
+    const data = await api('/api/referral/code');
+    if (data && data.ok && data.shareUrl) {
+      if (input) input.value = data.shareUrl;
+    } else {
+      if (input) input.value = window.location.origin;
+    }
+  } catch (_) {
+    if (input) input.value = window.location.origin;
+  }
+};
+
+window.closeReferralModal = function () {
+  const backdrop = document.getElementById('referralModalBackdrop');
+  if (backdrop) backdrop.classList.remove('open');
+};
+
+window.copyReferralLink = function () {
+  const input = document.getElementById('referralShareInput');
+  if (!input || !input.value) return;
+
+  if (window.navigator?.clipboard?.writeText) {
+    window.navigator.clipboard.writeText(input.value).then(() => {
+      alert('📋 لینک اختصاصی دعوت کپی شد! می‌توانید در گروه‌های درسی تلگرام بفرستید.');
+    }).catch(() => {
+      input.select();
+      document.execCommand('copy');
+      alert('📋 لینک دعوت کپی شد.');
+    });
+  } else {
+    input.select();
+    document.execCommand('copy');
+    alert('📋 لینک دعوت کپی شد.');
+  }
+};
+
+window.openExamPanicModal = async function () {
+  const backdrop = document.getElementById('examPanicModalBackdrop');
+  if (backdrop) backdrop.classList.add('open');
+  await refreshExamPanicPlan();
+};
+
+window.closeExamPanicModal = function () {
+  const backdrop = document.getElementById('examPanicModalBackdrop');
+  if (backdrop) backdrop.classList.remove('open');
+};
+
+async function refreshExamPanicPlan() {
+  const container = document.getElementById('examPanicPlanContainer');
+  const countdownLabel = document.getElementById('examCountdownLabel');
+  const courseId = AppState.course?.id || AppState.currentCourseSlug || 'sample_course';
+
+  if (container) container.innerHTML = '<div style="font-size:0.75rem; color:#94a3b8; padding:12px;">در حال بارگذاری برنامه اسپرینت‌های شب امتحان... ⏳</div>';
+
+  try {
+    const data = await api(`/api/course/exam-plan?courseId=${encodeURIComponent(courseId)}`);
+    if (data && data.ok) {
+      if (data.panicMode) {
+        if (countdownLabel) countdownLabel.textContent = `🔥 کمتر از ${data.hoursRemaining} ساعت تا امتحان مانده است! (حالت اضطراری فعال)`;
+      } else if (data.hasExam) {
+        if (countdownLabel) countdownLabel.textContent = `⏰ ${data.hoursRemaining} ساعت تا امتحان باقی‌مانده است.`;
+      } else {
+        if (countdownLabel) countdownLabel.textContent = 'تاریخ امتحان ثبت نشده است. لطفاً تاریخ امتحان را وارد کنید.';
+      }
+
+      if (data.plan && data.plan.length > 0) {
+        container.innerHTML = data.plan.map((sprint) => `
+          <div style="background:#1e293b; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <strong style="color:#38bdf8; font-size:0.8rem;">${escapeHtml(sprint.title)}</strong>
+              <span style="font-size:0.68rem; color:#fbbf24; background:rgba(245, 158, 11, 0.15); padding:2px 6px; border-radius:4px;">⏱️ ${sprint.durationMinutes} دقیقه</span>
+            </div>
+            <div style="font-size:0.72rem; color:#cbd5e1; margin-bottom:4px;">
+              🗂️ <strong>کارت‌های این اسپرینت:</strong> ${sprint.cards.length} کارت (${sprint.cards.map(c => `صفحه ${c.page || 1}`).join('، ')})
+            </div>
+            ${sprint.formulas && sprint.formulas.length ? `
+              <div style="font-size:0.72rem; color:#cbd5e1;">
+                📑 <strong>فرمول‌های کلیدی:</strong> ${sprint.formulas.map(f => f.topic).join(' • ')}
+              </div>
+            ` : ''}
+          </div>
+        `).join('');
+      } else {
+        container.innerHTML = '<div style="font-size:0.75rem; color:#94a3b8; padding:12px;">کارت ضعیفی یافت نشد یا برنامه آماده نیست.</div>';
+      }
+    }
+  } catch (err) {
+    if (container) container.innerHTML = `<div style="font-size:0.75rem; color:#f87171; padding:12px;">خطا: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+window.saveExamDateFromUi = async function () {
+  const dtInput = document.getElementById('examDateTimeInput');
+  if (!dtInput || !dtInput.value) {
+    alert('لطفاً تاریخ و ساعت امتحان را انتخاب کنید.');
+    return;
+  }
+
+  const examTimestamp = new Date(dtInput.value).getTime();
+  if (!Number.isFinite(examTimestamp) || examTimestamp <= Date.now()) {
+    alert('تاریخ امتحان باید در آینده باشد.');
+    return;
+  }
+
+  const courseId = AppState.course?.id || AppState.currentCourseSlug || 'sample_course';
+  try {
+    const data = await api('/api/course/exam-date', {
+      method: 'POST',
+      body: JSON.stringify({ courseId, examAt: examTimestamp })
+    });
+    if (data && data.ok) {
+      alert('✅ زمان امتحان ثبت شد و اسپرینت‌های فشرده پومودورو تنظیم گردید.');
+      await refreshExamPanicPlan();
+    } else {
+      alert(data?.message || 'خطا در ثبت تاریخ امتحان.');
+    }
+  } catch (err) {
+    alert(err?.message || 'خطا در ثبت تاریخ امتحان.');
+  }
+};
+
+window.checkDeepLinkNavigation = async function () {
+  const urlParams = new URLSearchParams(window.location.search);
+  let startParam = urlParams.get('tgWebAppStartParam') || urlParams.get('startapp') || urlParams.get('card') || '';
+  if (!startParam && window.Telegram?.WebApp?.initDataUnsafe?.start_param) {
+    startParam = window.Telegram.WebApp.initDataUnsafe.start_param;
+  }
+
+  if (startParam && startParam.startsWith('card_')) {
+    const match = startParam.match(/^card_([a-zA-Z0-9_\-]+)_([a-zA-Z0-9_\-]+)$/);
+    if (match) {
+      const courseId = match[1];
+      const targetCardId = match[2];
+
+      if (AppState.currentCourseSlug !== courseId) {
+        await switchCourse(courseId);
+      }
+
+      const flashcardTabBtn = document.querySelector('[data-tab="tabFlashcards"]');
+      if (flashcardTabBtn) flashcardTabBtn.click();
+
+      const deck = getFilteredCards();
+      const targetIdx = deck.findIndex(c => c.id === targetCardId || String(c.id).includes(targetCardId));
+      if (targetIdx !== -1) {
+        AppState.currentCardIndex = targetIdx;
+        renderFlashcardView();
+      }
+    }
+  }
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   const inp = document.getElementById('examImageInput');
   if (inp) inp.addEventListener('change', handleExamImageSelected);
   setTimeout(() => window.checkUrlForFactoryReview(), 500);
+  setTimeout(() => window.checkDeepLinkNavigation(), 400);
 });
 
 document.addEventListener('DOMContentLoaded', initStudyPlayer);

@@ -17,9 +17,17 @@
           <span>فهرست دروس</span>
         </button>
         <div class="header-top-actions">
+          <button class="share-btn-header" onclick="openReferralModal()" title="دعوت از دوستان و دریافت سهمیه AI">
+            <span>🎁</span>
+            <span>دعوت</span>
+          </button>
+          <button class="share-btn-header" onclick="openCampusModal()" title="تنظیم دانشگاه و رشته">
+            <span>🎓</span>
+            <span id="campusHeaderLabel">دانشگاه</span>
+          </button>
           <button class="share-btn-header" onclick="shareCurrentCourse()" title="اشتراک‌گذاری در گروه تلگرام">
             <span>📤</span>
-            <span>اشتراک درس</span>
+            <span>اشتراک</span>
           </button>
           <button class="pro-badge" id="headerProBtn" onclick="openPaywallModal()">
             🔓 نسخه کامل (۵۹ ت)
@@ -28,7 +36,10 @@
       </div>
       <div class="header-row">
         <div>
-          <h1 class="course-title" id="courseTitle">در حال بارگذاری جزوه...</h1>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <h1 class="course-title" id="courseTitle">در حال بارگذاری جزوه...</h1>
+            <span id="streakBadge" style="display:none; background:rgba(245, 158, 11, 0.2); border:1px solid #f59e0b; color:#fbbf24; font-size:0.72rem; padding:2px 6px; border-radius:12px; font-weight:700;">🔥 ۱ روز</span>
+          </div>
           <p class="course-subtitle" id="courseSubtitle"></p>
         </div>
       </div>
@@ -100,6 +111,13 @@
 
     <!-- TAB 3: Exam Simulator -->
     <section class="view-section" id="tabExamQuiz">
+      <div id="examPanicBanner" style="background:rgba(239, 68, 68, 0.12); border:1px solid rgba(239, 68, 68, 0.4); border-radius:10px; padding:8px 12px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <strong style="color:#f87171; font-size:0.82rem;" id="panicBannerTitle">⏰ حالت اضطراری شب امتحان</strong>
+          <div style="font-size:0.7rem; color:#cbd5e1;" id="panicBannerSubtitle">تنظیم تاریخ امتحان و اسپرینت‌های فشرده پومودورو</div>
+        </div>
+        <button class="pill-btn active" onclick="openExamPanicModal()" style="font-size:0.72rem; white-space:nowrap;">برنامه فشرده</button>
+      </div>
       <div id="examQuestionsContainer"></div>
     </section>
 
@@ -306,6 +324,103 @@
         <button class="unlock-btn-primary" id="factoryPublishBtn" onclick="publishCurrentFactoryJobFromUi()" style="width:100%; margin-top:0;">
           🚀 تایید و انتشار نهایی در کاتالوگ جزوات
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2-Tap Campus Onboarding Modal -->
+  <div class="modal-backdrop" id="campusModalBackdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-header">
+        <div>
+          <strong style="font-size:0.95rem; color:#38bdf8;">🎓 انتخاب دانشگاه و رشته تحصیلی</strong>
+          <div style="font-size:0.72rem; color:#94a3b8;">شخصی‌سازی دروس و اولویت‌بندی کاتالوگ برای دانشکده شما</div>
+        </div>
+        <button class="close-sheet-btn" onclick="closeCampusModal()">✕</button>
+      </div>
+
+      <div style="margin-bottom:12px;">
+        <label style="font-size:0.78rem; color:#cbd5e1; display:block; margin-bottom:4px;">دانشگاه محل تحصیل:</label>
+        <select class="chat-text-input" id="campusUniSelect" style="width:100%; font-size:0.8rem; background:#1e293b; color:#fff;">
+          <option value="">در حال دریافت لیست دانشگاه‌ها...</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom:12px;">
+        <label style="font-size:0.78rem; color:#cbd5e1; display:block; margin-bottom:4px;">رشته تحصیلی:</label>
+        <select class="chat-text-input" id="campusDeptSelect" style="width:100%; font-size:0.8rem; background:#1e293b; color:#fff;">
+          <option value="">در حال دریافت لیست رشته‌ها...</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="font-size:0.78rem; color:#cbd5e1; display:block; margin-bottom:4px;">ترم تحصیلی فعلی:</label>
+        <select class="chat-text-input" id="campusTermSelect" style="width:100%; font-size:0.8rem; background:#1e293b; color:#fff;">
+          <option value="1">ترم ۱</option>
+          <option value="2">ترم ۲</option>
+          <option value="3">ترم ۳</option>
+          <option value="4" selected>ترم ۴</option>
+          <option value="5">ترم ۵</option>
+          <option value="6">ترم ۶</option>
+          <option value="7">ترم ۷</option>
+          <option value="8">ترم ۸</option>
+        </select>
+      </div>
+
+      <button class="unlock-btn-primary" onclick="submitCampusProfileFromUi()" style="width:100%; margin-top:0;">
+        ✅ ذخیره و مشاهده دروس دانشکده
+      </button>
+    </div>
+  </div>
+
+  <!-- Viral Referral & Invite Modal -->
+  <div class="modal-backdrop" id="referralModalBackdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-header">
+        <div>
+          <strong style="font-size:0.95rem; color:#fbbf24;">🎁 دعوت از همکلاسی‌ها (هدیه دوطرفه)</strong>
+          <div style="font-size:0.72rem; color:#94a3b8;">دریافت ۵ سوال رایگان هوش مصنوعی با اولین خرید دوست شما</div>
+        </div>
+        <button class="close-sheet-btn" onclick="closeReferralModal()">✕</button>
+      </div>
+
+      <div style="font-size:0.78rem; color:#cbd5e1; background:rgba(245, 158, 11, 0.1); border:1px solid rgba(245, 158, 11, 0.3); padding:10px; border-radius:8px; margin-bottom:12px;">
+        💡 با ارسال این لینک به هم‌کلاسی‌هایتان، هر زمان اولین جزوه را تهیه کنند، <strong>۵ سوال هوش مصنوعی</strong> به شما و <strong>۵ سوال</strong> به دوستتان تعلق می‌گیرد!
+      </div>
+
+      <div style="margin-bottom:12px;">
+        <label style="font-size:0.76rem; color:#94a3b8; display:block; margin-bottom:4px;">لینک اختصاصی دعوت شما:</label>
+        <input type="text" class="chat-text-input" id="referralShareInput" readonly style="width:100%; font-size:0.75rem; text-align:left; direction:ltr;" />
+      </div>
+
+      <button class="unlock-btn-primary" onclick="copyReferralLink()" style="width:100%; margin-top:0;">
+        📋 کپی لینک دعوت و اشتراک در گروه کلاسی
+      </button>
+    </div>
+  </div>
+
+  <!-- Exam-Eve Panic Mode & Cram Plan Modal -->
+  <div class="modal-backdrop" id="examPanicModalBackdrop">
+    <div class="bottom-sheet" style="max-height:90vh; overflow-y:auto;">
+      <div class="sheet-header">
+        <div>
+          <strong style="font-size:0.95rem; color:#f87171;">⏰ برنامه اضطراری شب امتحان (Panic Mode)</strong>
+          <div style="font-size:0.72rem; color:#94a3b8;">اسپرینت‌های ۲۵ دقیقه‌ای پومودورو از کارت‌های نیازمند مرور</div>
+        </div>
+        <button class="close-sheet-btn" onclick="closeExamPanicModal()">✕</button>
+      </div>
+
+      <div style="margin-bottom:12px; background:#1e293b; padding:10px; border-radius:8px; border:1px solid #334155;">
+        <label style="font-size:0.78rem; color:#cbd5e1; display:block; margin-bottom:6px;">تنظیم زمان برگزاری امتحان پایانترم:</label>
+        <div style="display:flex; gap:8px;">
+          <input type="datetime-local" class="chat-text-input" id="examDateTimeInput" style="flex:1; font-size:0.76rem; background:#0f172a; color:#fff;" />
+          <button class="pill-btn active" onclick="saveExamDateFromUi()" style="font-size:0.74rem;">ثبت تاریخ</button>
+        </div>
+        <div id="examCountdownLabel" style="font-size:0.74rem; color:#fbbf24; margin-top:6px; font-weight:700;"></div>
+      </div>
+
+      <div id="examPanicPlanContainer">
+        <!-- Rendered dynamically -->
       </div>
     </div>
   </div>

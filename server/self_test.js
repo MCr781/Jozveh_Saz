@@ -31,7 +31,8 @@ const testResult = spawnSync(
     path.join(PROJECT_ROOT, 'server/test/sprint7_core.test.js'),
     path.join(PROJECT_ROOT, 'server/test/sprint7_full.test.js'),
     path.join(PROJECT_ROOT, 'server/test/sprint8_webhook_ledger.test.js'),
-    path.join(PROJECT_ROOT, 'server/test/sprint9_factory2.test.js')
+    path.join(PROJECT_ROOT, 'server/test/sprint9_factory2.test.js'),
+    path.join(PROJECT_ROOT, 'server/test/sprint10_growth.test.js')
   ],
   {
     cwd: PROJECT_ROOT,
@@ -62,5 +63,5 @@ if (p0Result.status !== 0) {
   process.exit(p0Result.status || 1);
 }
 
-console.log('\n✅ [SELF-TEST SUCCESS] All 51 tests and 8/8 P0 security checks passed cleanly!\n');
+console.log('\n✅ [SELF-TEST SUCCESS] All 65 tests and 8/8 P0 security checks passed cleanly!\n');
 process.exit(0);

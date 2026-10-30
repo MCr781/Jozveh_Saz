@@ -183,6 +183,59 @@ export const SCHEMA_V1 = `
     created_at INTEGER NOT NULL,
     resolved_at INTEGER
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS referral_codes(
+    user_id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS referrals(
+    referee_id INTEGER PRIMARY KEY,
+    referrer_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('bound','rewarded')),
+    created_at INTEGER NOT NULL,
+    rewarded_at INTEGER,
+    CHECK(referee_id != referrer_id)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS campus_profiles(
+    user_id INTEGER PRIMARY KEY,
+    university_id TEXT NOT NULL,
+    department_id TEXT NOT NULL,
+    term INTEGER NOT NULL CHECK(term BETWEEN 1 AND 12),
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS course_exams(
+    user_id INTEGER NOT NULL,
+    course_id TEXT NOT NULL,
+    exam_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id, course_id)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS study_events(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    course_id TEXT NOT NULL,
+    day_key TEXT NOT NULL,
+    cards_reviewed INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(user_id, day_key)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS scheduled_posts(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    course_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    teaser_text TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','sent','failed')),
+    retry_after INTEGER,
+    sent_at INTEGER
+  ) STRICT;
 `;
 
 export const SCHEMA_V2 = `
@@ -246,5 +299,60 @@ export const SCHEMA_V3 = `
     status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
     created_at INTEGER NOT NULL,
     resolved_at INTEGER
+  ) STRICT;
+`;
+
+export const SCHEMA_V4 = `
+  CREATE TABLE IF NOT EXISTS referral_codes(
+    user_id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS referrals(
+    referee_id INTEGER PRIMARY KEY,
+    referrer_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('bound','rewarded')),
+    created_at INTEGER NOT NULL,
+    rewarded_at INTEGER,
+    CHECK(referee_id != referrer_id)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS campus_profiles(
+    user_id INTEGER PRIMARY KEY,
+    university_id TEXT NOT NULL,
+    department_id TEXT NOT NULL,
+    term INTEGER NOT NULL CHECK(term BETWEEN 1 AND 12),
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS course_exams(
+    user_id INTEGER NOT NULL,
+    course_id TEXT NOT NULL,
+    exam_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id, course_id)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS study_events(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    course_id TEXT NOT NULL,
+    day_key TEXT NOT NULL,
+    cards_reviewed INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(user_id, day_key)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS scheduled_posts(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    course_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    teaser_text TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','sent','failed')),
+    retry_after INTEGER,
+    sent_at INTEGER
   ) STRICT;
 `;

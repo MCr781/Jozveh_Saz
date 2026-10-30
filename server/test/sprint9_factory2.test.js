@@ -41,9 +41,10 @@ const {
 } = await import('../../factory/generate.js');
 
 let baseUrl = '';
+const testCourseSlug = 's9_test_fluid_mechanics';
 
 before(async () => {
-  const createdContent = path.resolve('server/content/fluid_mechanics_01.json');
+  const createdContent = path.resolve(`server/content/${testCourseSlug}.json`);
   if (fs.existsSync(createdContent)) {
     try { fs.unlinkSync(createdContent); } catch (_) {}
   }
@@ -55,9 +56,11 @@ before(async () => {
 after(async () => {
   await new Promise((resolve) => server.close(resolve));
   try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    const createdContent = path.resolve('server/content/fluid_mechanics_01.json');
+    const createdContent = path.resolve(`server/content/${testCourseSlug}.json`);
     if (fs.existsSync(createdContent)) fs.unlinkSync(createdContent);
+  } catch (_) {}
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch (_) {}
 });
 
@@ -313,7 +316,7 @@ describe('Story S9-3: Factory Endpoints, Human Review Gate & Content Takedown', 
         'X-Telegram-Init-Data': creatorAuth
       },
       body: JSON.stringify({
-        courseSlug: 'fluid_mechanics_01',
+        courseSlug: testCourseSlug,
         title: 'مکانیک سیالات پیشرفته',
         priceToman: 49000,
         pages: [
@@ -344,7 +347,7 @@ describe('Story S9-3: Factory Endpoints, Human Review Gate & Content Takedown', 
     // CRITICAL INVARIANT: The course MUST NOT appear in /api/courses while in human_review!
     const catRes = await fetch(`${baseUrl}/api/courses`);
     const catData = await catRes.json();
-    const foundInCatalog = (catData.courses || []).some((c) => c.slug === 'fluid_mechanics_01');
+    const foundInCatalog = (catData.courses || []).some((c) => c.slug === testCourseSlug);
     assert.equal(foundInCatalog, false, 'Unapproved factory job must NOT appear in public catalog');
 
     // Duplicate check: Another creator trying to upload the same page gets 409 DUPLICATE_SOURCE
@@ -418,7 +421,7 @@ describe('Story S9-3: Factory Endpoints, Human Review Gate & Content Takedown', 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        courseId: 'fluid_mechanics_01',
+        courseId: testCourseSlug,
         reason: 'کپی‌رایت غیرمجاز از جزوه دست‌نویس استاد شریف'
       })
     });
@@ -434,16 +437,16 @@ describe('Story S9-3: Factory Endpoints, Human Review Gate & Content Takedown', 
     });
 
     // Verify DB flag
-    assert.equal(factoryRepo.isCourseTakedown(db, 'fluid_mechanics_01'), true);
+    assert.equal(factoryRepo.isCourseTakedown(db, testCourseSlug), true);
 
     // 3. Course is immediately hidden from /api/courses
     const catRes = await fetch(`${baseUrl}/api/courses`);
     const catData = await catRes.json();
-    const found = (catData.courses || []).some((c) => c.slug === 'fluid_mechanics_01');
+    const found = (catData.courses || []).some((c) => c.slug === testCourseSlug);
     assert.equal(found, false, 'Takedown course must be suppressed from /api/courses');
 
     // 4. Direct GET /api/course returns 404 with COURSE_TAKEDOWN
-    const courseRes = await fetch(`${baseUrl}/api/course?id=fluid_mechanics_01`);
+    const courseRes = await fetch(`${baseUrl}/api/course?id=${testCourseSlug}`);
     assert.equal(courseRes.status, 404);
     const errData = await courseRes.json();
     assert.equal(errData.code, 'COURSE_TAKEDOWN');

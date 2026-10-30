@@ -90,7 +90,7 @@ describe('Story S7-1: Configuration Validation & Health', () => {
   it('loadConfig returns a frozen config object with defaults', () => {
     const cfg = loadConfig({ NODE_ENV: 'development' });
     assert.ok(Object.isFrozen(cfg));
-    assert.equal(cfg.geminiModel, 'gemini-2.5-flash');
+    assert.equal(cfg.geminiModel, 'gemini-3.8-flash');
     assert.equal(cfg.port, 3000);
     assert.ok(cfg.stateDbPath.endsWith('jozveh.db') || cfg.stateDbPath.endsWith('.db'));
   });

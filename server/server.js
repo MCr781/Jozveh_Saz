@@ -15,6 +15,7 @@ import * as progressRepo from './repo/progress.js';
 import * as reportsRepo from './repo/reports.js';
 import * as inboxRepo from './repo/inbox.js';
 import * as factoryRepo from './repo/factory.js';
+import * as growthRepo from './repo/growth.js';
 import { runQualityGate, runFactoryPipeline, validateCoursePackage, sanitizeCoursePackage } from '../factory/generate.js';
 import { tgApi, notifyTelegram } from './telegram.js';
 import { requireUser, optionalUser, verifyInitData as authVerifyInitData, extractInitDataRaw, HttpError } from './auth.js';
@@ -26,7 +27,7 @@ const __dirname = path.dirname(__filename);
 export { loadEnvFile, getEnv } from './env.js';
 export { tgApi, notifyTelegram } from './telegram.js';
 export { requireUser, optionalUser, HttpError } from './auth.js';
-export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo, inboxRepo, factoryRepo };
+export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo, inboxRepo, factoryRepo, growthRepo };
 export { triggerTelegramBackupIfConfigured };
 
 export function escapeHtml(text) {
@@ -75,13 +76,21 @@ export async function probeGeminiModel() {
     modelProbeStatus = 'skipped';
     return;
   }
-  const model = process.env.GEMINI_MODEL?.trim() || config.geminiModel || 'gemini-2.5-flash';
+  let model = process.env.GEMINI_MODEL?.trim() || config.geminiModel || 'gemini-3.8-flash';
   const apiKey = keys[0];
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}`, {
+    let res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}`, {
       headers: { 'x-goog-api-key': apiKey },
       signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined
     });
+    if (!res.ok && res.status === 404 && model !== 'gemini-3.8-flash') {
+      console.warn(`⚠️ Model ${model} returned 404, probing fallback gemini-3.8-flash...`);
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash`, {
+        headers: { 'x-goog-api-key': apiKey },
+        signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined
+      });
+      if (res.ok) model = 'gemini-3.8-flash';
+    }
     if (res.ok) {
       modelProbeStatus = 'ok';
     } else {
@@ -94,32 +103,48 @@ export async function probeGeminiModel() {
   }
 }
 
-export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-2.5-flash' }) {
+export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
   const apiKey = getNextGeminiKey();
   if (!apiKey) return null;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey
-    },
-    body: JSON.stringify({ contents, generationConfig }),
-    signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(15000) : undefined
-  });
+  async function execute(targetModel) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
+      body: JSON.stringify({ contents, generationConfig }),
+      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(15000) : undefined
+    });
 
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new Error(data?.error?.message || `HTTP ${res.status}: ${res.statusText}`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      throw new Error('پاسخی از مدل Gemini دریافت نشد.');
+    }
+
+    return text;
   }
 
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    throw new Error('پاسخی از مدل Gemini دریافت نشد.');
+  try {
+    return await execute(model);
+  } catch (err) {
+    const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
+    if (isModelRetired && model !== 'gemini-3.8-flash') {
+      console.warn(`⚠️ Gemini model ${model} retired/unavailable (${err.message}). Retrying once with gemini-3.8-flash...`);
+      return await execute('gemini-3.8-flash');
+    }
+    throw err;
   }
-
-  return text;
 }
 
 function createCreatorEarningsProxy(initial = {}) {
@@ -411,6 +436,24 @@ export async function recordCourseSale(buyerUserId, courseSlugOrId, customPaymen
     );
   }
 
+  // ۴. فعال‌سازی پاداش معرف در اولین خرید تسویه‌شده دانشجو
+  try {
+    const rewardRes = growthRepo.triggerReferralRewardOnSale(db, { buyerId: buyerNumeric, courseId });
+    if (rewardRes && rewardRes.rewarded) {
+      const refStats = getUserStats(rewardRes.referrerId);
+      refStats.bonusQuota = (refStats.bonusQuota || 0) + 5;
+      const buyerStats = getUserStats(buyerUserId);
+      buyerStats.bonusQuota = (buyerStats.bonusQuota || 0) + 5;
+      saveDB();
+      if (botToken && rewardRes.referrerId) {
+        notifyTelegram(
+          rewardRes.referrerId,
+          `🎁 <b>پاداش دعوت از دوستان!</b>\nیکی از دوستان شما جزوه «${courseTitle}» را تهیه کرد و ۵ سوال هوش مصنوعی رایگان به حسابتان اضافه شد.`
+        ).catch(() => {});
+      }
+    }
+  } catch (_) {}
+
   triggerTelegramBackupIfConfigured({ dbPath: sqlitePath }).catch(() => {});
 
   return {
@@ -661,10 +704,17 @@ export const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/courses') {
     const rawAuth = getRawInitData(req);
     let userId = null;
+    let campusProfile = null;
     if (rawAuth) {
       const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
       if (auth.valid) {
         userId = String(auth.user.id);
+        if (auth.startParam && auth.startParam.startsWith('ref_')) {
+          try {
+            growthRepo.bindReferralIfEligible(db, { refereeId: auth.user.id, startParam: auth.startParam });
+          } catch (_) {}
+        }
+        campusProfile = growthRepo.getCampusProfile(db, userId);
       }
     }
 
@@ -680,6 +730,18 @@ export const server = http.createServer(async (req, res) => {
         }
         const isPurchased = userId ? (commerceRepo.hasPurchased(db, userId, data.id) || Boolean(DB.purchases[`${userId}_${data.id}`])) : false;
 
+        let isRecommended = false;
+        if (campusProfile) {
+          const deptCat = campusProfile.departmentCategory || '';
+          const deptName = campusProfile.departmentName || '';
+          const itemCat = data.category || '';
+          if (deptCat && itemCat === deptCat) {
+            isRecommended = true;
+          } else if (deptName && (itemCat.includes(deptName) || (data.title && data.title.includes(deptName)))) {
+            isRecommended = true;
+          }
+        }
+
         catalog.push({
           id: data.id,
           slug,
@@ -692,10 +754,17 @@ export const server = http.createServer(async (req, res) => {
           flashcards_count: (data.flashcards || []).length,
           questions_count: (data.exam_questions || []).length,
           cheat_sheet_count: (data.summary_cheat_sheet || []).length,
-          isProUnlocked: isPurchased
+          isProUnlocked: isPurchased,
+          isRecommendedForDepartment: isRecommended
         });
       } catch (_) {}
     }
+
+    catalog.sort((a, b) => {
+      if (a.isRecommendedForDepartment && !b.isRecommendedForDepartment) return -1;
+      if (!a.isRecommendedForDepartment && b.isRecommendedForDepartment) return 1;
+      return 0;
+    });
 
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ ok: true, courses: catalog }));
@@ -896,6 +965,11 @@ export const server = http.createServer(async (req, res) => {
 
         saveDB();
 
+        // ثبت رویداد مطالعه جهت محاسبه استریک متوالی شب امتحان (UTC+03:30)
+        const reviewedCount = Math.max(1, knownCount + reviewCount);
+        growthRepo.recordStudyEvent(db, { userId, courseId: canonicalCourseId, cardsReviewed: reviewedCount, now });
+        const streakInfo = growthRepo.getStreakAndBadges(db, userId, now);
+
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
           ok: true,
@@ -904,7 +978,10 @@ export const server = http.createServer(async (req, res) => {
           courseId: canonicalCourseId,
           slug: canonicalKey,
           reviewCount: totals.reviewCount,
-          pendingCourses: Object.values(recentCourses).filter((c) => c.reviewCount > 0).length
+          pendingCourses: Object.values(recentCourses).filter((c) => c.reviewCount > 0).length,
+          streak: streakInfo.currentStreakDays,
+          badges: streakInfo.badges,
+          totalCardsReviewed: streakInfo.totalCardsReviewed
         }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1900,6 +1977,191 @@ export const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: false, message: 'خطای سرور در انتشار جزوه.' }));
       }
     })();
+    return;
+  }
+
+  // ===== Milestone 10: Campus, Referrals & Exam Sprint Routes =====
+
+  // ۱. فهرست گزینه‌های دانشگاه و رشته‌های استاندارد
+  if (req.method === 'GET' && url.pathname === '/api/campus/options') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      ok: true,
+      universities: growthRepo.UNIVERSITIES,
+      departments: growthRepo.DEPARTMENTS
+    }));
+    return;
+  }
+
+  // ۲. دریافت پروفایل دانشگاهی دانشجو
+  if (req.method === 'GET' && url.pathname === '/api/campus/profile') {
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
+    const profile = growthRepo.getCampusProfile(db, auth.user.id);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, profile }));
+    return;
+  }
+
+  // ۳. ثبت/به‌روزرسانی پروفایل دانشگاهی دانشجو (تایید اکید مقادیر استاندارد بدون متن آزاد)
+  if (req.method === 'POST' && url.pathname === '/api/campus/profile') {
+    (async () => {
+      try {
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+        if (!auth.valid) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 65536);
+        } catch (bErr) {
+          if (bErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE' }));
+            return;
+          }
+          throw bErr;
+        }
+
+        let parsed = {};
+        try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
+        const { universityId, departmentId, term } = parsed;
+
+        const profile = growthRepo.saveCampusProfile(db, {
+          userId: auth.user.id,
+          universityId,
+          departmentId,
+          term
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, profile }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: err.message || 'خطا در ثبت پروفایل دانشگاهی.' }));
+      }
+    })();
+    return;
+  }
+
+  // ۴. دریافت کد اختصاصی و لینک دعوت رمزنگاری‌شده (Opaque Referral Code)
+  if (req.method === 'GET' && url.pathname === '/api/referral/code') {
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
+
+    const code = growthRepo.getOrCreateReferralCode(db, auth.user.id);
+    const botUser = (process.env.BOT_USERNAME || 'JozvehSazBot').replace(/^@/, '');
+    const shareUrl = `https://t.me/${botUser}?startapp=${encodeURIComponent(code)}`;
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, code, shareUrl }));
+    return;
+  }
+
+  // ۵. ثبت تاریخ برگزاری آزمون پایانترم برای یک درس
+  if (req.method === 'POST' && url.pathname === '/api/course/exam-date') {
+    (async () => {
+      try {
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+        if (!auth.valid) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+
+        let bodyRaw = await readBody(req, 65536);
+        let parsed = JSON.parse(bodyRaw || '{}');
+        const { courseId, examAt } = parsed;
+
+        if (!courseId || !examAt) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'شناسه درس و تاریخ امتحان الزامی است.' }));
+          return;
+        }
+
+        const found = findCourseFile(courseId);
+        const canonicalId = found?.data?.id || String(courseId).trim();
+
+        const resData = growthRepo.saveCourseExamDate(db, {
+          userId: auth.user.id,
+          courseId: canonicalId,
+          examAt: Number(examAt)
+        });
+
+        if (found?.slug && found.slug !== canonicalId) {
+          try {
+            growthRepo.saveCourseExamDate(db, {
+              userId: auth.user.id,
+              courseId: found.slug,
+              examAt: Number(examAt)
+            });
+          } catch (_) {}
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, ...resData }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: err.message || 'خطا در ثبت تاریخ امتحان.' }));
+      }
+    })();
+    return;
+  }
+
+  // ۶. دریافت برنامه فشرده شب امتحان (Exam-Eve Panic Mode & Cram Plan)
+  if (req.method === 'GET' && url.pathname === '/api/course/exam-plan') {
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
+
+    const courseIdParam = url.searchParams.get('courseId') || 'sample_course';
+    const found = findCourseFile(courseIdParam);
+    const userProgress = (DB.userStudyProgress || {})[String(auth.user.id)] || {};
+
+    const planResult = growthRepo.getCourseExamPlan(db, {
+      userId: auth.user.id,
+      courseId: found?.data?.id || courseIdParam,
+      courseData: found?.data,
+      userProgress
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, ...planResult }));
+    return;
+  }
+
+  // ۷. دریافت وضعیت استریک و نشان‌های وفاداری دانشجو (UTC+03:30)
+  if (req.method === 'GET' && url.pathname === '/api/study/streak') {
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
+
+    const streakData = growthRepo.getStreakAndBadges(db, auth.user.id);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, ...streakData }));
     return;
   }
 
