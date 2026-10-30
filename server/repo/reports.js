@@ -23,6 +23,10 @@ export function getReport(db, reportId) {
   return db.prepare('SELECT * FROM reports WHERE report_id = ?').get(reportId);
 }
 
+export function listReports(db, { limit = 50 } = {}) {
+  return db.prepare('SELECT * FROM reports ORDER BY created_at DESC LIMIT ?').all(limit);
+}
+
 export function resolveReport(db, { reportId, approve, now = Date.now() }) {
   return tx(db, () => {
     const report = db.prepare('SELECT * FROM reports WHERE report_id = ?').get(reportId);

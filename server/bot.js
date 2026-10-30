@@ -597,7 +597,7 @@ async function handleUpdate(update) {
     fs.mkdirSync(uploadsDir, { recursive: true });
     const localInput = path.join(uploadsDir, msg.document.file_name || `note_${Date.now()}.pdf`);
     const courseSlug = `course_${Date.now()}`;
-    const outputJsonPath = path.join(__dirname, '../public/data', `${courseSlug}.json`);
+    const outputJsonPath = path.join(__dirname, 'content', `${courseSlug}.json`);
 
     await notifyTelegram(chatId, '⏳ فایل جزوه دریافت شد! در حال ارسال به کارخانه Gemini 2.5 Flash و تست کامپایلر فرمول‌های KaTeX...');
 

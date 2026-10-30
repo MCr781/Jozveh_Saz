@@ -27,6 +27,62 @@ function getTelegramInitData() {
   return window.Telegram?.WebApp?.initData || window.TMA?.tg?.initData || '';
 }
 
+// XSS Protection: HTML entity escaping
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Unified API client wrapper with 15s timeout, Telegram auth & error surfacing
+async function api(path, options = {}) {
+  const apiBase = getApiBase();
+  const url = path.startsWith('http') ? path : `${apiBase}${path}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+  const headers = Object.assign({
+    'Content-Type': 'application/json',
+    'X-Telegram-Init-Data': getTelegramInitData()
+  }, options.headers || {});
+
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (res.status === 401) {
+      alert('لطفاً مینی‌اپ را از داخل تلگرام باز کنید.');
+      return { ok: false, status: 401, code: 'UNAUTHORIZED', message: 'لطفاً مینی‌اپ را از داخل تلگرام باز کنید.' };
+    }
+
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        code: data?.code || `HTTP_${res.status}`,
+        message: data?.message || data?.error || res.statusText,
+        data
+      };
+    }
+
+    return data || { ok: true, status: res.status };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      return { ok: false, status: 408, code: 'TIMEOUT', message: 'مهلت پاسخ‌دهی به پایان رسید (۱۵ ثانیه).' };
+    }
+    return { ok: false, status: 0, code: 'NETWORK_ERROR', message: err.message || 'خطای ارتباط با سرور' };
+  }
+}
+
 // Sanitize JSON control characters (\f, \t, \b) & render KaTeX safely
 function sanitizeLatex(str) {
   if (!str) return '';
@@ -46,27 +102,40 @@ function renderLatexExpression(latex, displayMode = false) {
       });
       return `<span class="katex-container" style="direction: ltr !important; unicode-bidi: isolate !important; display: ${displayMode ? 'block' : 'inline-block'};">${rendered}</span>`;
     } catch (_) {
-      return `<code dir="ltr">${clean}</code>`;
+      return `<code dir="ltr">${escapeHtml(clean)}</code>`;
     }
   }
-  return `<code dir="ltr">${clean}</code>`;
+  return `<code dir="ltr">${escapeHtml(clean)}</code>`;
 }
 
 function renderTextWithMath(text) {
   if (!text) return '';
-  let processed = sanitizeLatex(text);
+  const sanitized = sanitizeLatex(text);
 
-  // Block math $$...$$
-  processed = processed.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
-    return renderLatexExpression(math.trim(), true);
+  const mathTokens = [];
+  // 1. Block math $$...$$
+  let withTokens = sanitized.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+    const idx = mathTokens.length;
+    mathTokens.push(renderLatexExpression(math.trim(), true));
+    return `___MATH_BLOCK_${idx}___`;
   });
 
-  // Inline math $...$
-  processed = processed.replace(/\$([^\$]+?)\$/g, (_, math) => {
-    return renderLatexExpression(math.trim(), false);
+  // 2. Inline math $...$
+  withTokens = withTokens.replace(/\$([^\$]+?)\$/g, (_, math) => {
+    const idx = mathTokens.length;
+    mathTokens.push(renderLatexExpression(math.trim(), false));
+    return `___MATH_INLINE_${idx}___`;
   });
 
-  return processed.replace(/\n/g, '<br>');
+  // 3. Escape all non-math text so <img src=x onerror=...> never executes
+  let escaped = escapeHtml(withTokens);
+
+  // 4. Restore rendered KaTeX
+  escaped = escaped.replace(/___MATH_(?:BLOCK|INLINE)_(\d+)___/g, (_, idx) => {
+    return mathTokens[Number(idx)] || '';
+  });
+
+  return escaped.replace(/\n/g, '<br>');
 }
 
 function buildWatermarkHTML() {
@@ -114,26 +183,26 @@ function getItemById(itemId) {
 // بارگذاری جزوه مشخص‌شده با جابه‌جایی آنی بدون نیاز به ریفرش کامل مرورگر
 async function loadCourseData(courseSlug) {
   AppState.currentCourseSlug = courseSlug;
-  const apiBase = getApiBase();
 
   try {
     // ۱. دریافت داده‌ها از API سرور همراه با بررسی وضعیت خرید Pro
-    const apiRes = await fetch(`${apiBase}/api/course?id=${encodeURIComponent(courseSlug)}`, {
-      headers: { 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' }
-    });
-    if (!apiRes.ok) throw new Error('API course load failed');
-    const payload = await apiRes.json();
-    if (!payload.ok) throw new Error(payload.message || 'API failed');
-
-    AppState.course = payload.course;
-    AppState.isProUnlocked = Boolean(payload.isProUnlocked);
-    AppState.aiRemainingFree = payload.remainingAiQuota !== undefined ? payload.remainingAiQuota : 3;
+    const payload = await api(`/api/course?id=${encodeURIComponent(courseSlug)}`);
+    if (payload && payload.ok && payload.course) {
+      AppState.course = payload.course;
+      AppState.isProUnlocked = Boolean(payload.isProUnlocked);
+      AppState.aiRemainingFree = payload.remainingAiQuota !== undefined ? payload.remainingAiQuota : 3;
+    } else {
+      throw new Error(payload?.message || 'API course load failed');
+    }
   } catch (_) {
-    // ۲. Fallback مخصوص تست آفلاین و VS Code Live Server
-    const res = await fetch(`./data/${courseSlug}.json`);
-    AppState.course = await res.json();
-    AppState.aiRemainingFree = AppState.course.ai_quota_free || 3;
+    // ۲. Fallback مخصوص تست آفلاین
+    const fallback = AppState.catalog.find((c) => c.slug === courseSlug || c.id === courseSlug);
+    if (fallback) {
+      AppState.course = fallback;
+    }
   }
+
+  if (!AppState.course) return;
 
   AppState.currentCardIndex = 0;
   const loadedCourseId = AppState.course.id;
@@ -173,31 +242,21 @@ async function syncStudyProgress() {
   };
 
   try {
-    await fetch(`${getApiBase()}/api/sync-progress`, {
+    await api('/api/sync-progress', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
-      },
       body: JSON.stringify(payload),
       keepalive: true
     });
   } catch (_) {
-    // آفلاین یا Live Server: پیشرفت در localStorage/CloudStorage باقی می‌ماند
+    // آفلاین: پیشرفت در localStorage/CloudStorage باقی می‌ماند
   }
 }
 
-
 // دریافت کاتالوگ تمام دروس موجود
 async function fetchCatalog() {
-  const apiBase = getApiBase();
   try {
-    const res = await fetch(`${apiBase}/api/courses`, {
-      headers: { 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' }
-    });
-    if (!res.ok) throw new Error('Catalog fetch failed');
-    const data = await res.json();
-    if (data.ok && Array.isArray(data.courses) && data.courses.length > 0) {
+    const data = await api('/api/courses');
+    if (data && data.ok && Array.isArray(data.courses) && data.courses.length > 0) {
       AppState.catalog = data.courses;
       renderCatalogCourses();
       return;
@@ -236,23 +295,17 @@ async function fetchCatalog() {
 
 // دریافت آمار سهم ۷۰ درصدی جزوه‌نویس
 async function fetchCreatorStats() {
-  const apiBase = getApiBase();
   try {
-    const res = await fetch(`${apiBase}/api/creator-stats`, {
-      headers: { 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' }
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.ok) {
-        AppState.creatorStats = {
-          balanceToman: data.balanceToman || 0,
-          salesCount: data.salesCount || 0
-        };
-        const salesEl = document.getElementById('creatorSalesCount');
-        const balEl = document.getElementById('creatorBalanceToman');
-        if (salesEl) salesEl.textContent = `${(data.salesCount || 0).toLocaleString('fa-IR')} پکیج`;
-        if (balEl) balEl.textContent = `${(data.balanceToman || 0).toLocaleString('fa-IR')} تومان`;
-      }
+    const data = await api('/api/creator-stats');
+    if (data && data.ok) {
+      AppState.creatorStats = {
+        balanceToman: data.balanceToman || 0,
+        salesCount: data.salesCount || 0
+      };
+      const salesEl = document.getElementById('creatorSalesCount');
+      const balEl = document.getElementById('creatorBalanceToman');
+      if (salesEl) salesEl.textContent = `${(data.salesCount || 0).toLocaleString('fa-IR')} پکیج`;
+      if (balEl) balEl.textContent = `${(data.balanceToman || 0).toLocaleString('fa-IR')} تومان`;
     }
   } catch (_) {}
 }
@@ -678,25 +731,24 @@ window.sendContextualPrompt = async function (presetKey, customText) {
   if (!userMsg) return;
   if (!customText) inputEl.value = '';
 
-  chatBox.innerHTML += `<div class="chat-bubble user">${userMsg}</div>`;
+  // XSS protection: safely append user message with textContent
+  const userBubble = document.createElement('div');
+  userBubble.className = 'chat-bubble user';
+  userBubble.textContent = userMsg;
+  chatBox.appendChild(userBubble);
   chatBox.scrollTop = chatBox.scrollHeight;
 
   const loadingId = 'loading_ctx_' + Date.now();
   chatBox.innerHTML += `<div class="chat-bubble ai" id="${loadingId}">در حال پردازش بر اساس جزوه استاد... ⏳</div>`;
   chatBox.scrollTop = chatBox.scrollHeight;
 
-  const apiBase = getApiBase();
   const contextDesc = AppState.activeContextItem
     ? `صفحه ${AppState.activeContextItem.sourcePage}: ${AppState.activeContextItem.originalText}`
     : (AppState.course?.title || '');
 
   try {
-    const res = await fetch(`${apiBase}/api/ask-tutor`, {
+    const data = await api('/api/ask-tutor', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
-      },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
         contextText: contextDesc,
@@ -705,22 +757,26 @@ window.sendContextualPrompt = async function (presetKey, customText) {
       })
     });
 
-    const data = await res.json().catch(() => null);
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
 
-    if (res.status === 402 || data?.quotaExceeded) {
+    if (data.status === 402 || data?.quotaExceeded) {
       closeContextualDrawer();
       openPaywallModal();
       return;
     }
 
-    if (res.status === 429) {
+    if (data.status === 429) {
       alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
       return;
     }
 
-    if (res.ok && data?.ok) {
+    if (data.status === 503 || data.code === 'AI_UPSTREAM') {
+      alert('سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً بعداً تلاش فرمایید (سهمیه شما محفوظ است).');
+      return;
+    }
+
+    if (data && data.ok) {
       window.TMA.triggerHaptic('success');
       chatBox.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
       chatBox.scrollTop = chatBox.scrollHeight;
@@ -731,20 +787,12 @@ window.sendContextualPrompt = async function (presetKey, customText) {
       return;
     }
     throw new Error(data?.message || 'Server error');
-  } catch (_) {
+  } catch (err) {
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
 
-    // Fallback محلی به sample_ai_responses
-    const responses = AppState.course?.sample_ai_responses || {};
-    const replyRaw = responses[presetKey] || responses.default || 'به رابطه مستقیم متغیرها در فرمول اصلی دقت فرمایید.';
-    window.TMA.triggerHaptic('success');
-    chatBox.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(replyRaw)}</div>`;
-    chatBox.scrollTop = chatBox.scrollHeight;
-
-    if (!AppState.isProUnlocked) {
-      AppState.aiRemainingFree = Math.max(0, AppState.aiRemainingFree - 1);
-      renderAiQuotaBadge();
+    if (err?.message && err.message !== 'Server error') {
+      alert(err.message);
     }
   }
 };
@@ -761,22 +809,20 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
   if (!question) return;
   if (!labelText) input.value = '';
 
-  box.innerHTML += `<div class="chat-bubble user">${question}</div>`;
+  // XSS protection: safely append user message with textContent
+  const userBubble = document.createElement('div');
+  userBubble.className = 'chat-bubble user';
+  userBubble.textContent = question;
+  box.appendChild(userBubble);
   box.scrollTop = box.scrollHeight;
 
   const loadingId = 'loading_main_' + Date.now();
   box.innerHTML += `<div class="chat-bubble ai" id="${loadingId}">در حال حل با روش و فرمول‌های استاد... ⏳</div>`;
   box.scrollTop = box.scrollHeight;
 
-  const apiBase = getApiBase();
-
   try {
-    const res = await fetch(`${apiBase}/api/ask-tutor`, {
+    const data = await api('/api/ask-tutor', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
-      },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
         contextText: AppState.course?.title || '',
@@ -785,21 +831,25 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
       })
     });
 
-    const data = await res.json().catch(() => null);
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
 
-    if (res.status === 402 || data?.quotaExceeded) {
+    if (data.status === 402 || data?.quotaExceeded) {
       openPaywallModal();
       return;
     }
 
-    if (res.status === 429) {
+    if (data.status === 429) {
       alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
       return;
     }
 
-    if (res.ok && data?.ok) {
+    if (data.status === 503 || data.code === 'AI_UPSTREAM') {
+      alert('سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً بعداً تلاش فرمایید (سهمیه شما محفوظ است).');
+      return;
+    }
+
+    if (data && data.ok) {
       window.TMA.triggerHaptic('success');
       box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
       box.scrollTop = box.scrollHeight;
@@ -810,20 +860,11 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
       return;
     }
     throw new Error(data?.message || 'Server error');
-  } catch (_) {
+  } catch (err) {
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
-
-    // Fallback محلی به sample_ai_responses
-    const responses = AppState.course?.sample_ai_responses || {};
-    const answer = responses[presetKey] || responses.default || 'بر اساس جزوه کلاسی، متغیرها را بر حسب واحدهای استاندارد SI بازنویسی کنید.';
-    window.TMA.triggerHaptic('success');
-    box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(answer)}</div>`;
-    box.scrollTop = box.scrollHeight;
-
-    if (!AppState.isProUnlocked) {
-      AppState.aiRemainingFree = Math.max(0, AppState.aiRemainingFree - 1);
-      renderAiQuotaBadge();
+    if (err?.message && err.message !== 'Server error') {
+      alert(err.message);
     }
   }
 };
@@ -1032,12 +1073,8 @@ window.submitVerifiedReport = async function () {
   const apiBase = getApiBase();
 
   try {
-    const res = await fetch(`${apiBase}/api/report-issue`, {
+    const data = await api('/api/report-issue', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''
-      },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
         itemId: currentReportTarget.itemId,
@@ -1046,20 +1083,16 @@ window.submitVerifiedReport = async function () {
         sourcePage: currentReportTarget.sourcePage
       })
     });
-    const data = await res.json().catch(() => null);
     lastLocalReportTimestamp = Date.now();
     if (data && data.message) {
       alert(data.message);
     } else {
-      alert(res.ok ? '✅ گزارش ثبت شد.' : 'خطا در ثبت گزارش.');
+      alert(data && data.ok ? '✅ گزارش ثبت شد.' : 'خطا در ثبت گزارش.');
     }
     if (data && data.ok) closeReportModal();
-  } catch (_) {
-    // Fallback در صورتی که فقط با Live Server تست می‌کنی و سرور پورت 3000 روشن نیست
+  } catch (err) {
     lastLocalReportTimestamp = Date.now();
-    window.TMA.triggerHaptic('success');
-    alert('✅ [حالت دمو] گزارش شما ثبت و برای داور هوش مصنوعی ارسال شد! پس از تایید صحت علمی، ۲ سهمیه پرسش رایگان به حساب شما اضافه خواهد شد.');
-    closeReportModal();
+    alert(err?.message || 'خطا در ثبت گزارش.');
   } finally {
     btn.disabled = false;
     btn.textContent = 'ارسال برای صحت‌سنجی هوشمند';
@@ -1109,7 +1142,10 @@ async function handleExamImageSelected(e) {
     const base64 = await compressImageFileToBase64(file);
     const box = document.getElementById('mainAiChatBox');
     if (box) {
-      box.innerHTML += `<div class="chat-bubble user">📷 تصویر سوال امتحانی ارسال شد</div>`;
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble user';
+      bubble.textContent = '📷 تصویر سوال امتحانی ارسال شد';
+      box.appendChild(bubble);
       box.scrollTop = box.scrollHeight;
     }
     await sendExamImageToSolver(base64);
@@ -1126,11 +1162,9 @@ window.sendExamImageToSolver = async function (imageBase64) {
     box.innerHTML += `<div class="chat-bubble ai" id="${loadingId}">در حال خواندن تصویر و حل سوال... ⏳</div>`;
     box.scrollTop = box.scrollHeight;
   }
-  const apiBase = getApiBase();
   try {
-    const res = await fetch(`${apiBase}/api/ask-tutor`, {
+    const data = await api('/api/ask-tutor', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' },
       body: JSON.stringify({
         courseId: AppState.course?.id || 'sample_course',
         contextText: AppState.course?.title || '',
@@ -1139,12 +1173,15 @@ window.sendExamImageToSolver = async function (imageBase64) {
         imageBase64
       })
     });
-    const data = await res.json().catch(() => null);
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.remove();
-    if (res.status === 402 || data?.quotaExceeded) { openPaywallModal(); return; }
-    if (res.status === 429) { alert(data?.message || 'لطفاً چند ثانیه صبر کنید.'); return; }
-    if (res.ok && data?.ok) {
+    if (data.status === 402 || data?.quotaExceeded) { openPaywallModal(); return; }
+    if (data.status === 429) { alert(data?.message || 'لطفاً چند ثانیه صبر کنید.'); return; }
+    if (data.status === 503 || data.code === 'AI_UPSTREAM') {
+      alert('سرویس هوش مصنوعی موقتاً در دسترس نیست. سهمیه شما کسر نشد.');
+      return;
+    }
+    if (data && data.ok) {
       window.TMA.triggerHaptic('success');
       if (box) {
         box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
@@ -1154,28 +1191,22 @@ window.sendExamImageToSolver = async function (imageBase64) {
       return;
     }
     throw new Error(data?.message || 'Server error');
-  } catch (_) {
-    const loadingEl = document.getElementById(loadingId); if (loadingEl) loadingEl.remove();
-    const responses = AppState.course?.sample_ai_responses || {};
-    const answer = responses.example || responses.default || 'بر اساس جزوه استاد، متغیرها را در فرمول جایگذاری کنید.';
-    if (box) {
-      box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(answer)}</div>`;
-      box.scrollTop = box.scrollHeight;
+  } catch (err) {
+    const loadingEl = document.getElementById(loadingId);
+    if (loadingEl) loadingEl.remove();
+    if (err?.message && err.message !== 'Server error') {
+      alert(err.message);
     }
-    if (!AppState.isProUnlocked) { AppState.aiRemainingFree = Math.max(0, AppState.aiRemainingFree - 1); renderAiQuotaBadge(); }
   }
 };
 
 // ===== Milestone 4: Real Payment Gateway =====
 window.startOnlinePayment = async function () {
-  const apiBase = getApiBase();
   try {
-    const res = await fetch(`${apiBase}/api/payment/create`, {
+    const data = await api('/api/payment/create', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || '' },
       body: JSON.stringify({ courseId: AppState.currentCourseSlug })
     });
-    const data = await res.json().catch(() => null);
     if (data && data.paymentUrl) {
       window.location.href = data.paymentUrl;
       return;
@@ -1185,8 +1216,8 @@ window.startOnlinePayment = async function () {
       return;
     }
     alert(data?.message || 'خطا در ایجاد پرداخت.');
-  } catch (_) {
-    await simulateUnlockPurchase('درگاه بانکی شاپرک');
+  } catch (err) {
+    alert(err?.message || 'خطا در اتصال به درگاه پرداخت.');
   }
 };
 

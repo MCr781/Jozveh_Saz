@@ -25,7 +25,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(PROJECT_ROOT, 'public', 'data');
+const CONTENT_DIR = path.join(PROJECT_ROOT, 'server', 'content');
 
 const DEFAULT_TITLE = 'پکیج شب امتحان انجماد و ریخته‌گری';
 const DEFAULT_CATEGORY = 'مهندسی مواد و متالورژی';
@@ -345,7 +345,7 @@ const HELP_TEXT = `
   --instructor <text>  نام/توضیح استاد
   --creator <text>     نام جزوه‌نویس
   --creator-id <id>    شناسه تلگرام جزوه‌نویس (برای واریز سهم ۷۰٪)
-  --out <path>         مسیر خروجی سفارشی (پیش‌فرض: public/data/<id>.json)
+  --out <path>         مسیر خروجی سفارشی (پیش‌فرض: server/content/<id>.json)
   --demo               ساخت پکیج نمونهٔ آفلاین و تست‌شده با KaTeX
   --force              اجازهٔ بازنویسی فایل خروجی در حالت تولید واقعی
   --help               نمایش همین راهنما
@@ -389,7 +389,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   const outputPath = args.out
     ? path.resolve(process.cwd(), String(args.out))
-    : path.join(DATA_DIR, `${id}.json`);
+    : path.join(CONTENT_DIR, `${id}.json`);
 
   console.log('');
   console.log('🎓 کارخانه جزوه زنده — حالت ' + (args.demo ? 'دموی آفلاین' : 'تولید با هوش مصنوعی'));

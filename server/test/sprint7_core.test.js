@@ -40,7 +40,7 @@ describe('Story S7-1: Configuration Validation & Health', () => {
     assert.ok(res.errors.some((e) => e.includes('ALLOW_DEMO_PAYMENTS')));
   });
 
-  it('rejects demo or empty MERCHANT_ID in production', () => {
+  it('rejects demo or placeholder MERCHANT_ID in production', () => {
     const resDemo = validateConfig({
       NODE_ENV: 'production',
       BOT_TOKEN: 'token',
@@ -55,6 +55,25 @@ describe('Story S7-1: Configuration Validation & Health', () => {
       MERCHANT_ID: 'YOUR_MERCHANT_ID'
     });
     assert.equal(resPlaceholder.valid, false);
+  });
+
+  it('rejects empty whitespace GEMINI_MODEL when explicitly specified', () => {
+    const res = validateConfig({
+      NODE_ENV: 'production',
+      BOT_TOKEN: 'token',
+      GEMINI_MODEL: '   '
+    });
+    assert.equal(res.valid, false);
+    assert.ok(res.errors.some((e) => e.includes('GEMINI_MODEL')));
+  });
+
+  it('allows undefined MERCHANT_ID and GEMINI_MODEL on Render production boot', () => {
+    const res = validateConfig({
+      NODE_ENV: 'production',
+      BOT_TOKEN: '123456:RENDER-TOKEN',
+      ADMIN_CHAT_ID: '123456'
+    });
+    assert.equal(res.valid, true);
   });
 
   it('rejects relative STATE_DB_PATH in production', () => {

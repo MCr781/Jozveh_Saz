@@ -24,6 +24,16 @@ export { tgApi, notifyTelegram } from './telegram.js';
 export { requireUser, optionalUser, HttpError } from './auth.js';
 export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo };
 
+export function escapeHtml(text) {
+  if (text === null || text === undefined) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export const PORT = Number(process.env.PORT?.trim()) || config.port || 3000;
 
 export const DEFAULT_INITDATA_MAX_AGE_SEC = Number(process.env.INITDATA_MAX_AGE_SEC?.trim()) || config.initDataMaxAgeSec || 86400;
@@ -63,7 +73,7 @@ export async function probeGeminiModel() {
   const model = process.env.GEMINI_MODEL?.trim() || config.geminiModel || 'gemini-2.5-flash';
   const apiKey = keys[0];
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}?key=${apiKey}`, {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}`, {
       headers: { 'x-goog-api-key': apiKey },
       signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined
     });
@@ -83,11 +93,15 @@ export async function callGeminiRestServer({ contents, generationConfig, model =
   const apiKey = getNextGeminiKey();
   if (!apiKey) return null;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents, generationConfig })
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey
+    },
+    body: JSON.stringify({ contents, generationConfig }),
+    signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(15000) : undefined
   });
 
   const data = await res.json().catch(() => null);
@@ -187,32 +201,146 @@ export function saveDB() {
   } catch (_) {}
 }
 
-// یافتن امن فایل جزوه بر اساس slug یا id
-export function findCourseFile(identifier) {
-  if (!identifier) return null;
-  const dataDir = path.join(__dirname, '../public/data');
-  if (!fs.existsSync(dataDir)) return null;
+export function readBody(req, maxBytes = 1024 * 1024, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    let finished = false;
 
-  // ۱. بررسی تطابق مستقیم نام فایل slug
-  const directSlug = path.basename(identifier).replace(/\.json$/i, '');
-  const directPath = path.join(dataDir, `${directSlug}.json`);
-  if (fs.existsSync(directPath)) {
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      req.destroy();
+      const err = new Error('Request body read timeout');
+      err.statusCode = 408;
+      reject(err);
+    }, timeoutMs);
+
+    req.on('data', (chunk) => {
+      if (finished) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        finished = true;
+        clearTimeout(timer);
+        req.pause();
+        const err = new Error('Payload Too Large');
+        err.statusCode = 413;
+        reject(err);
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on('end', () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+
+    req.on('error', (err) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+export function getContentDir() {
+  const serverContent = path.resolve(__dirname, 'content');
+  if (fs.existsSync(serverContent)) return serverContent;
+  return path.resolve(__dirname, '../public/data');
+}
+
+let catalogCache = null;
+let catalogCacheMtime = 0;
+
+export function getCourseCatalog() {
+  const contentDir = getContentDir();
+  if (!fs.existsSync(contentDir)) {
+    return { catalog: [], mapBySlug: new Map(), mapById: new Map() };
+  }
+
+  let latestMtime = 0;
+  try {
+    const dirStat = fs.statSync(contentDir);
+    latestMtime = dirStat.mtimeMs;
+    const entries = fs.readdirSync(contentDir);
+    for (const entry of entries) {
+      if (entry.endsWith('.json')) {
+        const s = fs.statSync(path.join(contentDir, entry));
+        if (s.mtimeMs > latestMtime) latestMtime = s.mtimeMs;
+      }
+    }
+  } catch (_) {}
+
+  if (catalogCache && latestMtime <= catalogCacheMtime) {
+    return catalogCache;
+  }
+
+  const files = fs.readdirSync(contentDir).filter((f) => f.endsWith('.json') && !f.includes('..'));
+  const catalog = [];
+  const mapBySlug = new Map();
+  const mapById = new Map();
+
+  for (const file of files) {
     try {
-      const data = JSON.parse(fs.readFileSync(directPath, 'utf8'));
-      return { path: directPath, slug: directSlug, data };
+      const fullPath = path.join(contentDir, file);
+      const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+      const slug = path.basename(file, '.json');
+      const item = { path: fullPath, slug, data };
+      catalog.push(item);
+      mapBySlug.set(slug, item);
+      if (data.id) mapById.set(data.id, item);
     } catch (_) {}
   }
 
-  // ۲. بررسی شناسه در تمام فایل‌های پوشه data
-  const files = fs.readdirSync(dataDir).filter((f) => f.endsWith('.json') && !f.includes('..'));
-  for (const file of files) {
-    const fullPath = path.join(dataDir, file);
-    try {
-      const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-      if (data.id === identifier || path.basename(file, '.json') === identifier) {
-        return { path: fullPath, slug: path.basename(file, '.json'), data };
-      }
-    } catch (_) {}
+  catalogCache = { catalog, mapBySlug, mapById };
+  catalogCacheMtime = latestMtime;
+  return catalogCache;
+}
+
+// یافتن امن فایل جزوه بر اساس slug یا id
+export function findCourseFile(identifier) {
+  if (!identifier) return null;
+  const { mapBySlug, mapById, catalog } = getCourseCatalog();
+  const slug = path.basename(identifier).replace(/\.json$/i, '');
+  if (mapBySlug.has(slug)) return mapBySlug.get(slug);
+  if (mapById.has(identifier)) return mapById.get(identifier);
+  return catalog.find((c) => c.data.id === identifier || c.slug === identifier) || null;
+}
+
+export function findCourseItem(courseId, itemId) {
+  const course = findCourseFile(courseId);
+  if (!course?.data) return null;
+  const data = course.data;
+
+  const flashcard = (data.flashcards || []).find((f, idx) => f.id === itemId || `flashcard_${idx}` === itemId || String(idx) === String(itemId));
+  if (flashcard) {
+    return {
+      type: 'flashcard',
+      originalText: `${flashcard.front || ''}\n${flashcard.back || ''}`.trim(),
+      sourcePage: flashcard.source_page || 1
+    };
+  }
+
+  const question = (data.exam_questions || []).find((q, idx) => q.id === itemId || `exam_${idx}` === itemId || String(idx) === String(itemId));
+  if (question) {
+    return {
+      type: 'exam_question',
+      originalText: `${question.question_stem || question.question || ''}\n${question.explanation || question.answer || ''}`.trim(),
+      sourcePage: question.source_page || 1
+    };
+  }
+
+  const cheat = (data.summary_cheat_sheet || []).find((c, idx) => c.id === itemId || `cheat_${idx}` === itemId || String(idx) === String(itemId));
+  if (cheat) {
+    return {
+      type: 'cheat_sheet',
+      originalText: `${cheat.topic || ''}\n${cheat.formula_latex || (cheat.key_points || []).join(' ') || ''}`.trim(),
+      sourcePage: cheat.source_page || 1
+    };
   }
 
   return null;
@@ -389,14 +517,25 @@ export function checkSpamShield(userId, itemKey) {
 }
 
 // ۳. داور هوش مصنوعی (AI Fact-Checker) با استفاده از Native fetch
-async function verifyReportWithAIJudge({ originalText, userClaim, sourcePage }) {
+export async function verifyReportWithAIJudge({ originalText, userClaim, sourcePage }) {
   if (!getGeminiKeys().length) {
+    const isDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
+    if (isDemo) {
+      return {
+        is_valid: true,
+        confidence: 95,
+        reason: 'تایید آزمایشی در حالت لوکال (دمو)',
+        corrected_text: originalText,
+        general_rule_for_memory: `دقت در فرمول‌های صفحه ${sourcePage}`
+      };
+    }
     return {
-      is_valid: true,
-      confidence: 95,
-      reason: 'تایید آزمایشی در حالت لوکال (کلید Gemini ست نشده است)',
+      is_valid: false,
+      pending_manual: true,
+      confidence: 0,
+      reason: 'عدم دسترسی به هوش مصنوعی (ارجاع برای بررسی دستی)',
       corrected_text: originalText,
-      general_rule_for_memory: `دقت در فرمول‌های صفحه ${sourcePage}`
+      general_rule_for_memory: ''
     };
   }
 
@@ -432,15 +571,18 @@ async function verifyReportWithAIJudge({ originalText, userClaim, sourcePage }) 
         temperature: 0.1
       }
     });
+    if (!responseText) throw new Error('Empty response from AI judge');
     return JSON.parse(responseText);
   } catch (err) {
     console.error('AI Judge Gemini error:', err.message);
+    // FAIL CLOSED: Never auto-valid on network/API failure
     return {
-      is_valid: true,
-      confidence: 80,
-      reason: 'تایید خودکار به دلیل اختلال در API داور',
+      is_valid: false,
+      pending_manual: true,
+      confidence: 0,
+      reason: 'خطا در ارتباط با داور هوشمند (ارجاع به بررسی دستی)',
       corrected_text: originalText,
-      general_rule_for_memory: `بررسی دقیق صفحه ${sourcePage}`
+      general_rule_for_memory: ''
     };
   }
 }
@@ -480,7 +622,10 @@ export const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Telegram-Init-Data, Authorization');
   // هدرهای امنیتی پایه (سازگار با WebView تلگرام)
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'ALLOWALL');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org;"
+  );
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -516,22 +661,14 @@ export const server = http.createServer(async (req, res) => {
       }
     }
 
-    const dataDir = path.join(__dirname, '../public/data');
-    if (!fs.existsSync(dataDir)) {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ ok: true, courses: [] }));
-      return;
-    }
-
-    const files = fs.readdirSync(dataDir).filter((f) => f.endsWith('.json') && !f.includes('..'));
+    const { catalog: cachedCatalog } = getCourseCatalog();
     const catalog = [];
 
-    for (const file of files) {
+    for (const item of cachedCatalog) {
       try {
-        const fullPath = path.join(dataDir, file);
-        const data = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-        const slug = path.basename(file, '.json');
-        const isPurchased = userId ? Boolean(DB.purchases[`${userId}_${data.id}`]) : false;
+        const data = item.data;
+        const slug = item.slug;
+        const isPurchased = userId ? (commerceRepo.hasPurchased(db, userId, data.id) || Boolean(DB.purchases[`${userId}_${data.id}`])) : false;
 
         catalog.push({
           id: data.id,
@@ -630,11 +767,21 @@ export const server = http.createServer(async (req, res) => {
   }
 
   // ۴. همگام‌سازی پیشرفت مرور لایتنر (Leitner Spaced Repetition Sync)
-  if (req.method === 'POST' && url.pathname === '/api/sync-progress') {
-    let body = '';
-    req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
-    req.on('end', () => {
+  if (req.method === 'POST' && (url.pathname === '/api/sync-progress' || url.pathname === '/api/study-progress/sync')) {
+    (async () => {
       try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 256 * 1024);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'حجم درخواست بیش از حد مجاز است.' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
         const rawAuth = getRawInitData(req);
         const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
@@ -652,7 +799,7 @@ export const server = http.createServer(async (req, res) => {
 
         let payload;
         try {
-          payload = JSON.parse(body || '{}');
+          payload = JSON.parse(bodyRaw || '{}');
         } catch (_) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'بدنهٔ درخواست همگام‌سازی معتبر نیست.' }));
@@ -753,16 +900,26 @@ export const server = http.createServer(async (req, res) => {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در همگام‌سازی پیشرفت مرور.' }));
       }
-    });
+    })();
     return;
   }
 
   // ۵. API پرسش و حل سوال امتحانی با هوش مصنوعی (همراه با Rate-Limit و شمارش سهمیه سرور)
   if (req.method === 'POST' && url.pathname === '/api/ask-tutor') {
-    let body = '';
-    req.on('data', (chunk) => { if (body.length < 1024 * 1024) body += chunk; });
-    req.on('end', async () => {
+    (async () => {
       try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 1024 * 1024);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'حجم درخواست بیش از حد مجاز است.' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
         const rawAuth = getRawInitData(req);
         const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
@@ -771,7 +928,7 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const { courseId, contextText, question, presetKey, imageBase64 } = JSON.parse(body || '{}');
+        const { courseId = 'sample_course', contextText, question, presetKey, imageBase64 } = JSON.parse(bodyRaw || '{}');
         const userId = String(auth.user.id);
         const st = getUserStats(userId);
 
@@ -784,10 +941,13 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const isPurchased = Boolean(DB.purchases[`${userId}_${courseId}`]);
-        const maxQuota = isPurchased ? 100 : 3 + (st.bonusQuota || 0);
+        const isPurchased = commerceRepo.hasPurchased(db, userId, courseId) || Boolean(DB.purchases[`${userId}_${courseId}`]);
+        const aiUsage = aiRepo.getAiUsage(db, userId, courseId);
+        const currentQueries = aiUsage.queriesCount || (st.usedAiQueries || 0);
+        const bonusQuota = aiUsage.bonusQuota || (st.bonusQuota || 0);
+        const maxQuota = isPurchased ? 100 : 3 + bonusQuota;
 
-        if ((st.usedAiQueries || 0) >= maxQuota) {
+        if (currentQueries >= maxQuota) {
           res.writeHead(402, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, quotaExceeded: true, message: 'سهمیه پرسش رایگان شما تمام شده است. لطفاً نسخه کامل را تهیه کنید.' }));
           return;
@@ -796,23 +956,26 @@ export const server = http.createServer(async (req, res) => {
         const cleanQuestion = String(question || '').trim().slice(0, 350);
         const cleanContext = String(contextText || '').trim().slice(0, 500);
 
-        if (!cleanQuestion) {
+        if (!cleanQuestion && !imageBase64) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: false, message: 'متن سوال نمی‌تواند خالی باشد.' }));
+          res.end(JSON.stringify({ ok: false, message: 'متن یا تصویر سوال نمی‌تواند خالی باشد.' }));
           return;
         }
 
-        st.lastChatAt = now;
-        st.usedAiQueries = (st.usedAiQueries || 0) + 1;
-        saveDB();
-
+        const allowDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
         let replyText = '';
 
         if (!getGeminiKeys().length) {
-          if (imageBase64) {
-            replyText = `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید؛ واحدها را به SI تبدیل نمایید.`;
+          if (allowDemo) {
+            if (imageBase64) {
+              replyText = `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید.`;
+            } else {
+              replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند.`;
+            }
           } else {
-            replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند و فرمول‌های پایه ملاک محاسبات نهایی هستند.`;
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'سرویس هوش مصنوعی در حال حاضر پیکربندی نشده است.' }));
+            return;
           }
         } else {
           try {
@@ -831,32 +994,56 @@ export const server = http.createServer(async (req, res) => {
               contents: [{ parts }],
               generationConfig: { temperature: 0.25 }
             });
+            if (!replyText) throw new Error('Empty response from AI upstream');
           } catch (err) {
             console.error('Gemini ask-tutor error:', err.message);
-            replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که مقادیر در شرایط استاندارد سنجیده می‌شوند.`;
+            if (allowDemo) {
+              replyText = `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، مقادیر در شرایط استاندارد سنجیده می‌شوند.`;
+            } else {
+              // S7-6: Do NOT consume quota on upstream failure/timeout!
+              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'خطا در برقراری ارتباط با مدل هوش مصنوعی. لطفاً دوباره تلاش کنید.' }));
+              return;
+            }
           }
         }
+
+        // تنها پس از دریافت موفقیت‌آمیز پاسخ از مدل، سهمیه مصرف می‌شود
+        aiRepo.recordAiQuery(db, { userId, courseId, now });
+        st.lastChatAt = now;
+        st.usedAiQueries = currentQueries + 1;
+        saveDB();
 
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
           ok: true,
           reply: replyText,
-          remainingAiQuota: Math.max(0, maxQuota - st.usedAiQueries)
+          remainingAiQuota: Math.max(0, maxQuota - (currentQueries + 1))
         }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در پردازش سوال.' }));
       }
-    });
+    })();
     return;
   }
 
   // ۶. API ثبت گزارش خطای هوشمند با سپر ضداسپم و داور AI
   if (req.method === 'POST' && url.pathname === '/api/report-issue') {
-    let body = '';
-    req.on('data', (chunk) => { if (body.length < 4096) body += chunk; });
-    req.on('end', async () => {
+    (async () => {
       try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 65536);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'حجم درخواست بیش از حد مجاز است.' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
         const rawAuth = getRawInitData(req);
         const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
@@ -865,7 +1052,7 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const { courseId, itemId, originalText, userClaim, sourcePage } = JSON.parse(body || '{}');
+        const { courseId, itemId, userClaim } = JSON.parse(bodyRaw || '{}');
         const cleanClaim = String(userClaim || '').trim().slice(0, 200);
 
         if (cleanClaim.length < 5) {
@@ -874,7 +1061,18 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
+        // استخراج متن اصلی از سمت سرور بر اساس کاتالوگ (صرف‌نظر از ورودی کلاینت)
+        const serverItem = findCourseItem(courseId, itemId);
+        if (!serverItem) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'آیتم مورد نظر در جزوه یافت نشد.' }));
+          return;
+        }
+
+        const originalText = serverItem.originalText;
+        const sourcePage = serverItem.sourcePage;
         const itemKey = `${courseId}_${itemId}`;
+
         const spamCheck = checkSpamShield(String(auth.user.id), itemKey);
         if (!spamCheck.allowed) {
           res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -887,7 +1085,8 @@ export const server = http.createServer(async (req, res) => {
 
         const verdict = await verifyReportWithAIJudge({ originalText, userClaim: cleanClaim, sourcePage });
 
-        if (!verdict.is_valid || verdict.confidence < 70) {
+        if (!verdict.is_valid && !verdict.pending_manual) {
+          // داور فعالانه گزارش را رد کرده (اسپم/ادعای نادرست)
           spamCheck.stats.rejectedStrikes = (spamCheck.stats.rejectedStrikes || 0) + 1;
           saveDB();
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -899,28 +1098,54 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const reportId = `rep_${Date.now()}`;
+        const sanitizedRule = String(verdict.general_rule_for_memory || '')
+          .replace(/[\x00-\x1F\x7F]/g, ' ')
+          .trim()
+          .slice(0, 200);
+
+        const reportStatus = verdict.pending_manual ? 'pending_manual' : 'pending_admin';
+
         DB.reportedItemsLock[itemKey] = true;
         DB.pendingReports[reportId] = {
           courseId,
           itemId,
           userId: String(auth.user.id),
           claim: cleanClaim,
-          proposedFix: verdict.corrected_text,
-          learnedRule: verdict.general_rule_for_memory,
-          status: 'pending_admin'
+          proposedFix: verdict.corrected_text || originalText,
+          learnedRule: sanitizedRule,
+          status: reportStatus
         };
         saveDB();
 
-        const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
+        try {
+          reportsRepo.createReport(db, {
+            reportId,
+            courseId,
+            itemId,
+            userId: String(auth.user.id),
+            claim: cleanClaim,
+            proposedFix: verdict.corrected_text || originalText,
+            learnedRule: sanitizedRule
+          });
+        } catch (_) {}
+
+        const adminChatId = process.env.ADMIN_CHAT_ID?.trim() || config.adminChatId;
         if (adminChatId) {
+          const headerBadge = verdict.pending_manual
+            ? '🛠️ <b>گزارش خطای جدید (نیازمند بررسی دستی ادمین)</b>'
+            : `🛠️ <b>گزارش خطای تاییدشده توسط AI (${escapeHtml(verdict.confidence)}%)</b>`;
+
+          const memoryLine = sanitizedRule
+            ? `\n\n🧠 <b>قانون پیشنهادی برای حافظه:</b>\n${escapeHtml(sanitizedRule)}`
+            : '';
+
           await notifyTelegram(
             adminChatId,
-            `🛠️ <b>گزارش خطای تاییدشده توسط AI (${verdict.confidence}%)</b>\n\n` +
-            `👤 کاربر: <code>${auth.user.id}</code>\n` +
-            `📍 آیتم: <code>${itemKey}</code> (صفحه ${sourcePage})\n` +
-            `💬 گزارش دانشجو: ${cleanClaim}\n\n` +
-            `✨ <b>اصلاح پیشنهادی:</b>\n${verdict.corrected_text}\n\n` +
-            `🧠 <b>قانون جدید برای حافظه:</b>\n${verdict.general_rule_for_memory}`,
+            `${headerBadge}\n\n` +
+            `👤 کاربر: <code>${escapeHtml(auth.user.id)}</code>\n` +
+            `📍 آیتم: <code>${escapeHtml(itemKey)}</code> (صفحه ${escapeHtml(sourcePage)})\n` +
+            `💬 گزارش دانشجو: ${escapeHtml(cleanClaim)}\n\n` +
+            `✨ <b>اصلاح پیشنهادی:</b>\n${escapeHtml(verdict.corrected_text || originalText)}${memoryLine}`,
             [[
               { text: '✅ اعمال در جزوه + جایزه', callback_data: `approve_${reportId}` },
               { text: '🚫 رد و جریمه اسپمر', callback_data: `reject_${reportId}` }
@@ -928,25 +1153,36 @@ export const server = http.createServer(async (req, res) => {
           );
         }
 
+        const userSuccessMsg = verdict.pending_manual
+          ? '✅ گزارش شما دریافت شد و برای بررسی دستی ادمین ارسال گردید.'
+          : '✅ گزارش شما توسط داور هوشمند تایید اولیه شد! پس از اعمال نهایی، ۲ سهمیه پرسش رایگان به حساب شما اضافه می‌شود.';
+
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({
-          ok: true,
-          message: '✅ گزارش شما توسط داور هوشمند تایید اولیه شد! پس از اعمال نهایی، ۲ سهمیه پرسش رایگان به حساب شما اضافه می‌شود.'
-        }));
+        res.end(JSON.stringify({ ok: true, message: userSuccessMsg }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در بررسی گزارش.' }));
       }
-    });
+    })();
     return;
   }
 
   // ===== Payment Gateway (Zarinpal) Create =====
   if (req.method === 'POST' && url.pathname === '/api/payment/create') {
-    let body = '';
-    req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
-    req.on('end', async () => {
+    (async () => {
       try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 65536);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'حجم درخواست بیش از حد مجاز است.' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
         const rawAuth = getRawInitData(req);
         const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
@@ -956,7 +1192,7 @@ export const server = http.createServer(async (req, res) => {
         }
         const userId = String(auth.user.id);
         let parsed = {};
-        try { parsed = JSON.parse(body || '{}'); } catch (_) {}
+        try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
         const { courseId } = parsed;
         const found = findCourseFile(courseId);
         if (!found) {
@@ -1035,7 +1271,7 @@ export const server = http.createServer(async (req, res) => {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در ایجاد پرداخت.' }));
       }
-    });
+    })();
     return;
   }
 
@@ -1144,10 +1380,20 @@ export const server = http.createServer(async (req, res) => {
 
   // ===== Creator Payout =====
   if (req.method === 'POST' && url.pathname === '/api/creator-payout') {
-    let body = '';
-    req.on('data', (chunk) => { if (body.length < 65536) body += chunk; });
-    req.on('end', async () => {
+    (async () => {
       try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 65536);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'حجم درخواست بیش از حد مجاز است.' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
         const rawAuth = getRawInitData(req);
         const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: MONEY_INITDATA_MAX_AGE_SEC });
         if (!auth.valid) {
@@ -1158,7 +1404,7 @@ export const server = http.createServer(async (req, res) => {
 
         const creatorId = String(auth.user.id);
         let parsed = {};
-        try { parsed = JSON.parse(body || '{}'); } catch (_) {}
+        try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
         const { sheba, amount } = parsed;
 
         const cleanSheba = String(sheba || '').trim().toUpperCase();
@@ -1227,14 +1473,14 @@ export const server = http.createServer(async (req, res) => {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در ثبت تسویه.' }));
       }
-    });
+    })();
     return;
   }
 
-  // مسدود کردن دسترسی مستقیم مرورگر به فایل‌های خام JSON در پوشه data
+  // هرگونه درخواست به /data/* باید با کد ۴۰۴ رد شود (محتوا در server/content محافظت می‌شود)
   if (url.pathname.startsWith('/data/')) {
-    res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'Direct access to raw course data is forbidden. Use /api/course.' }));
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: false, code: 'NOT_FOUND', error: 'Not Found' }));
     return;
   }
 

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  verify:
+    name: Verify & Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [ 24.x ]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Syntax Check All JS Files
+        run: |
+          find . -name "*.js" -not -path "*/node_modules/*" -not -path "*/.git/*" -exec node --check {} +
+
+      - name: Run Sprint 7 Unit & Integration Tests
+        run: |
+          node --test reference/reference.test.js server/test/*.test.js
+
+      - name: Run P0 Security Exploit Regression
+        run: |
+          node reference/p0_regression.mjs .

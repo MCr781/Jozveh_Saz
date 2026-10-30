@@ -19,9 +19,13 @@ export function validateConfig(env = process.env) {
       errors.push('ALLOW_DEMO_PAYMENTS is forbidden in production.');
     }
 
-    const merchantId = (env.MERCHANT_ID || '').trim();
-    if (!merchantId || merchantId.toLowerCase() === 'demo' || merchantId.startsWith('YOUR_')) {
-      errors.push('A real MERCHANT_ID is required in production (not demo or YOUR_*).');
+    // Merchant ID: in production, if provided, must not be 'demo' or 'YOUR_*'.
+    // If undefined or empty, server boots in manual-receipt-only mode (onlineGatewayEnabled: false).
+    if (env.MERCHANT_ID !== undefined) {
+      const merchantId = env.MERCHANT_ID.trim();
+      if (merchantId.toLowerCase() === 'demo' || merchantId.startsWith('YOUR_')) {
+        errors.push("MERCHANT_ID must not be a placeholder ('demo' or 'YOUR_*') in production.");
+      }
     }
 
     const dbPath = (env.STATE_DB_PATH || '').trim();
@@ -29,9 +33,10 @@ export function validateConfig(env = process.env) {
       errors.push('STATE_DB_PATH must be an absolute path.');
     }
 
-    const geminiModel = (env.GEMINI_MODEL || '').trim();
-    if (env.GEMINI_API_KEY_1 && !geminiModel) {
-      errors.push('GEMINI_MODEL must not be empty when Gemini API keys are configured.');
+    // Gemini Model: if undefined, defaults cleanly to 'gemini-2.5-flash'.
+    // Only fails if explicitly set to empty or whitespace string.
+    if (env.GEMINI_MODEL !== undefined && env.GEMINI_MODEL.trim() === '') {
+      errors.push('GEMINI_MODEL cannot be empty/whitespace when specified.');
     }
   }
 
@@ -77,6 +82,9 @@ export function loadConfig(env = process.env) {
     (env.GEMINI_API_KEY_3 || '').trim()
   ].filter((k) => k && !k.startsWith('YOUR_'));
 
+  const merchantId = (env.MERCHANT_ID || '').trim();
+  const onlineGatewayEnabled = Boolean(merchantId && merchantId.toLowerCase() !== 'demo' && !merchantId.startsWith('YOUR_'));
+
   return Object.freeze({
     isProd,
     nodeEnv: env.NODE_ENV || 'development',
@@ -89,7 +97,8 @@ export function loadConfig(env = process.env) {
     initDataMoneyMaxAgeSec: moneyMaxAgeSec,
     geminiKeys,
     geminiModel,
-    merchantId: (env.MERCHANT_ID || '').trim(),
+    merchantId,
+    onlineGatewayEnabled,
     paymentCallbackBase: (env.PAYMENT_CALLBACK_BASE || '').trim().replace(/\/+$/, ''),
     zarinpalBase: (env.ZARINPAL_BASE || '').trim().replace(/\/+$/, '') || 'https://api.zarinpal.com',
     allowDemoPayments: (env.ALLOW_DEMO_PAYMENTS || '').trim() === '1' && !isProd,

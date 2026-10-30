@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
+import { config } from '../server/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,18 +36,21 @@ export function getNextApiKey() {
   return apiKey;
 }
 
-export async function callGeminiRest({ contents, generationConfig, model = 'gemini-2.5-flash' }) {
+export async function callGeminiRest({ contents, generationConfig, model = config.geminiModel || 'gemini-2.5-flash' }) {
   const maxRetries = Math.max(1, getGeminiApiKeys().length);
   let lastError = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const apiKey = getNextApiKey();
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
         body: JSON.stringify({ contents, generationConfig })
       });
 

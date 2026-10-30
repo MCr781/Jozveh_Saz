@@ -32,7 +32,8 @@ const call = async (p, { method = 'GET', body, user, ageSec } = {}) => {
 const results = [];
 const check = (name, secure, detail = '') => { results.push(secure); console.log(`${secure ? 'PASS' : 'FAIL'}  ${name}${detail ? '  -> ' + detail : ''}`); };
 
-const course = fs.readdirSync(path.join(REPO, 'public/data')).find((f) => f.endsWith('.json')).replace('.json', '');
+const contentDir = fs.existsSync(path.join(REPO, 'server/content')) ? path.join(REPO, 'server/content') : path.join(REPO, 'public/data');
+const course = fs.readdirSync(contentDir).find((f) => f.endsWith('.json')).replace('.json', '');
 const goodSheba = (() => { const b = '0170000000123456789012'; return 'IR' + String(98n - (BigInt(b + '182700') % 97n)).padStart(2, '0') + b; })();
 
 // T1 unauthenticated verify without Authority must not unlock anything
