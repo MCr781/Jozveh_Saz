@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { SCHEMA_V1, SCHEMA_V2 } from './schema.js';
+import { SCHEMA_V1, SCHEMA_V2, SCHEMA_V3 } from './schema.js';
 
 export function openDb(file) {
   const db = new DatabaseSync(file);
@@ -52,6 +52,12 @@ export function migrate(db) {
         db.exec('ALTER TABLE users ADD COLUMN sheba_updated_at INTEGER;');
       } catch (_) {}
       db.exec('PRAGMA user_version = 2;');
+    });
+  }
+  if (v < 3) {
+    tx(db, () => {
+      db.exec(SCHEMA_V3);
+      db.exec('PRAGMA user_version = 3;');
     });
   }
 }

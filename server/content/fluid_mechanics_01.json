@@ -1,0 +1,67 @@
+{
+  "id": "fluid_mechanics_01",
+  "title": "مکانیک سیالات پیشرفته",
+  "instructor": "منطبق بر جزوه کلاسی",
+  "creator": "Reza",
+  "creator_telegram_id": "888777",
+  "category": "دروس عمومی مهندسی",
+  "price_toman": 49000,
+  "ai_quota_free": 3,
+  "ai_quota_pro": 100,
+  "summary_cheat_sheet": [
+    {
+      "id": "summary_1",
+      "topic": "مبحث کلیدی صفحه 1: مفاهیم پایه",
+      "key_points": [
+        "نکته مهم صفحه 1 از جزوه",
+        "رابطه تحلیلی در دمای $T = 300 K$ برقرار است."
+      ],
+      "formula_latex": "\\Delta U = Q - W",
+      "source_page": 1,
+      "needsReview": true,
+      "reviewReason": "اعداد تاییدنشده با دست‌نویس منبع: [300]"
+    }
+  ],
+  "flashcards": [
+    {
+      "id": "fc_1",
+      "is_locked": false,
+      "front": "پرسش اصلاح‌شده &lt;script&gt;alert(&quot;hacked&quot;)&lt;/script&gt; با رابطه $P = 50 Pa$",
+      "back": "پایستگی انرژی که با فرمول $\\Delta U = Q - W$ بیان می‌شود.",
+      "source_page": 1,
+      "needsReview": false
+    },
+    {
+      "id": "fc_2",
+      "is_locked": false,
+      "front": "تغییر انرژی در یک فرایند آدیاباتیک به چه صورت است؟",
+      "back": "در فرایند آدیاباتیک چون $Q = 0$ است، تغییر انرژی برابر با کار انجام‌شده منفی می‌باشد.",
+      "source_page": 1,
+      "needsReview": false
+    }
+  ],
+  "exam_questions": [
+    {
+      "id": "exam_1",
+      "is_locked": false,
+      "question_stem": "در مسائل صفحه 1، اگر کار ورودی $W = 50 J$ باشد، تغییر انرژی در فرایند عایق چقدر است؟",
+      "options": [
+        "-50 J",
+        "50 J",
+        "0 J",
+        "100 J"
+      ],
+      "correct_index": 0,
+      "explanation": "طبق رابطه $\\Delta U = -W$ در شرایط عایق حرارتی، مقدار تغییر برابر -50 ژول خواهد بود.",
+      "source_page": 1,
+      "needsReview": true,
+      "reviewReason": "اعداد تاییدنشده با دست‌نویس منبع: [100]"
+    }
+  ],
+  "sample_ai_responses": {
+    "simplify": "این مبحث یکی از پایه‌های اصلی امتحان است؛ به رابطه مستقیم متغیرها در فرمول دقت کنید.",
+    "example": "برای حل مسائل عددی این بخش، ابتدا واحدها را به دستگاه SI تبدیل نمایید.",
+    "exam_tip": "دام متداول طراح در این سوال، دادن مقادیر بر حسب واحد غیر استاندارد است!",
+    "default": "بر اساس جزوه استاد، برای حل این سوال کافی است مقادیر معلوم را در رابطه اصلی فصل جایگذاری کنید."
+  }
+}

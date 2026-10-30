@@ -142,6 +142,47 @@ export const SCHEMA_V1 = `
     bank_name TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS factory_jobs(
+    id TEXT PRIMARY KEY,
+    creator_id TEXT NOT NULL,
+    course_slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL,
+    price_toman INTEGER NOT NULL CHECK(price_toman >= 0),
+    state TEXT NOT NULL CHECK(state IN ('intake','quality_gate','transcribe','structure','validate','human_review','published','failed','takedown')),
+    draft_json TEXT,
+    validation_report TEXT,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    token_budget INTEGER NOT NULL DEFAULT 60000,
+    error_code TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS factory_pages(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES factory_jobs(id),
+    page_num INTEGER NOT NULL,
+    image_sha256 TEXT NOT NULL,
+    dhash TEXT NOT NULL,
+    blur_score REAL NOT NULL,
+    exposure_score REAL NOT NULL,
+    transcription_json TEXT,
+    confidence REAL,
+    uncertain INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(job_id, page_num)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS content_takedowns(
+    id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    reporter_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+  ) STRICT;
 `;
 
 export const SCHEMA_V2 = `
@@ -162,5 +203,48 @@ export const SCHEMA_V2 = `
     sheba TEXT NOT NULL,
     bank_name TEXT NOT NULL,
     updated_at INTEGER NOT NULL
+  ) STRICT;
+`;
+
+export const SCHEMA_V3 = `
+  CREATE TABLE IF NOT EXISTS factory_jobs(
+    id TEXT PRIMARY KEY,
+    creator_id TEXT NOT NULL,
+    course_slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL,
+    price_toman INTEGER NOT NULL CHECK(price_toman >= 0),
+    state TEXT NOT NULL CHECK(state IN ('intake','quality_gate','transcribe','structure','validate','human_review','published','failed','takedown')),
+    draft_json TEXT,
+    validation_report TEXT,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    token_budget INTEGER NOT NULL DEFAULT 60000,
+    error_code TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS factory_pages(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES factory_jobs(id),
+    page_num INTEGER NOT NULL,
+    image_sha256 TEXT NOT NULL,
+    dhash TEXT NOT NULL,
+    blur_score REAL NOT NULL,
+    exposure_score REAL NOT NULL,
+    transcription_json TEXT,
+    confidence REAL,
+    uncertain INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(job_id, page_num)
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS content_takedowns(
+    id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    reporter_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
   ) STRICT;
 `;

@@ -1221,10 +1221,410 @@ window.startOnlinePayment = async function () {
   }
 };
 
+// ===== Factory 2.0 Client Studio & Computer Vision =====
+
+function computeLaplacianVariance(imageData) {
+  const { width, height, data } = imageData;
+  const gray = new Float32Array(width * height);
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+
+  let sum = 0;
+  let count = 0;
+  const laplacian = new Float32Array((width - 2) * (height - 2));
+  let idx = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    const rowOffset = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const val =
+        gray[rowOffset - width + x] +
+        gray[rowOffset + width + x] +
+        gray[rowOffset + x - 1] +
+        gray[rowOffset + x + 1] -
+        4 * gray[rowOffset + x];
+      laplacian[idx++] = val;
+      sum += val;
+      count++;
+    }
+  }
+
+  if (count === 0) return 0;
+  const mean = sum / count;
+  let varianceSum = 0;
+  for (let i = 0; i < count; i++) {
+    const diff = laplacian[i] - mean;
+    varianceSum += diff * diff;
+  }
+  return varianceSum / count;
+}
+
+function computeMeanExposure(imageData) {
+  const data = imageData.data;
+  let sum = 0;
+  const total = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  return total ? (sum / total) : 128;
+}
+
+function computeDHash64(canvasOrImg) {
+  const cvs = document.createElement('canvas');
+  cvs.width = 9;
+  cvs.height = 8;
+  const ctx = cvs.getContext('2d');
+  ctx.drawImage(canvasOrImg, 0, 0, 9, 8);
+  const imgData = ctx.getImageData(0, 0, 9, 8).data;
+  const gray = [];
+  for (let i = 0; i < imgData.length; i += 4) {
+    gray.push(0.299 * imgData[i] + 0.587 * imgData[i + 1] + 0.114 * imgData[i + 2]);
+  }
+  let hex = '';
+  for (let row = 0; row < 8; row++) {
+    let byte = 0;
+    for (let col = 0; col < 8; col++) {
+      const left = gray[row * 9 + col];
+      const right = gray[row * 9 + col + 1];
+      if (left > right) {
+        byte |= (1 << (7 - col));
+      }
+    }
+    hex += byte.toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+window.computeLaplacianVariance = computeLaplacianVariance;
+window.computeMeanExposure = computeMeanExposure;
+window.computeDHash64 = computeDHash64;
+
+let factoryProcessedPages = [];
+let activeFactoryJob = null;
+
+window.openFactoryStudioModal = function () {
+  const backdrop = document.getElementById('factoryStudioBackdrop');
+  if (backdrop) backdrop.classList.add('open');
+};
+
+window.closeFactoryStudioModal = function () {
+  const backdrop = document.getElementById('factoryStudioBackdrop');
+  if (backdrop) backdrop.classList.remove('open');
+};
+
+window.handleFactoryFilesChange = async function (files) {
+  if (!files || !files.length) return;
+  const preview = document.getElementById('factoryPagesPreview');
+  const processBtn = document.getElementById('factoryProcessBtn');
+  if (preview) preview.innerHTML = '<div style="font-size:0.75rem; color:#94a3b8;">در حال ارزیابی کیفیت تصاویر جزوه... ⏳</div>';
+
+  factoryProcessedPages = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const pageNum = i + 1;
+    try {
+      const pageData = await processPageFile(file, pageNum);
+      factoryProcessedPages.push(pageData);
+    } catch (err) {
+      console.warn('Error processing page:', err);
+    }
+  }
+
+  renderFactoryPagesPreview();
+  if (processBtn) processBtn.style.display = factoryProcessedPages.length > 0 ? 'block' : 'none';
+};
+
+async function processPageFile(file, pageNum = 1) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = async () => {
+        const maxEdge = 1600;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxEdge || h > maxEdge) {
+          if (w > h) {
+            h = Math.round((h * maxEdge) / w);
+            w = maxEdge;
+          } else {
+            w = Math.round((w * maxEdge) / h);
+            h = maxEdge;
+          }
+        }
+        const cvs = document.createElement('canvas');
+        cvs.width = w;
+        cvs.height = h;
+        const ctx = cvs.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const blurScore = computeLaplacianVariance(imgData);
+        const exposureScore = computeMeanExposure(imgData);
+        const dhash = computeDHash64(cvs);
+
+        const dataUrl = cvs.toDataURL('image/jpeg', 0.85);
+
+        // هش SHA-256
+        let shaHex = '';
+        try {
+          const bin = atob(dataUrl.split(',')[1]);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          if (window.crypto?.subtle) {
+            const hashBuf = await window.crypto.subtle.digest('SHA-256', arr);
+            shaHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+          }
+        } catch (_) {}
+        if (!shaHex) shaHex = 'sha256_' + Math.random().toString(36).slice(2);
+
+        const isAcceptable = blurScore >= 35 && exposureScore >= 20 && exposureScore <= 240;
+
+        resolve({
+          pageNum,
+          blurScore: Math.round(blurScore * 10) / 10,
+          exposureScore: Math.round(exposureScore * 10) / 10,
+          dhash,
+          imageSha256: shaHex,
+          dataUrl,
+          isAcceptable
+        });
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+window.processPageFile = processPageFile;
+
+function renderFactoryPagesPreview() {
+  const container = document.getElementById('factoryPagesPreview');
+  if (!container) return;
+
+  if (!factoryProcessedPages.length) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const hasFailingPage = factoryProcessedPages.some((p) => !p.isAcceptable);
+
+  let warningHtml = '';
+  if (hasFailingPage) {
+    warningHtml = `
+      <div style="background:rgba(239, 68, 68, 0.15); border:1px solid #ef4444; color:#fca5a5; padding:8px 10px; border-radius:8px; font-size:0.75rem; margin-bottom:8px;">
+        ⚠️ برخی صفحات کیفیت لازم را ندارند (مات یا نور نامناسب). لطفاً صفحات مشخص‌شده را مجدداً عکاسی کنید.
+      </div>
+    `;
+  }
+
+  container.innerHTML = warningHtml + factoryProcessedPages.map((p) => {
+    const blurBadge = p.blurScore >= 35
+      ? `<span style="color:#34d399;">✅ وضوح مناسب (${p.blurScore})</span>`
+      : `<span style="color:#f87171;">⚠️ مات (${p.blurScore} &lt; 35)</span>`;
+
+    const expBadge = (p.exposureScore >= 20 && p.exposureScore <= 240)
+      ? `<span style="color:#34d399;">✅ نور استاندارد (${p.exposureScore})</span>`
+      : `<span style="color:#f87171;">⚠️ نور نامناسب (${p.exposureScore})</span>`;
+
+    return `
+      <div style="display:flex; align-items:center; gap:8px; padding:6px; background:#1e293b; border-radius:6px; margin-bottom:6px; border:1px solid ${p.isAcceptable ? '#334155' : '#ef4444'};">
+        <img src="${p.dataUrl}" style="width:40px; height:40px; object-fit:cover; border-radius:4px;" />
+        <div style="font-size:0.72rem; flex:1;">
+          <strong>برگه ${p.pageNum}</strong>
+          <div>${blurBadge} • ${expBadge}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+window.submitFactoryJobFromUi = async function () {
+  const title = (document.getElementById('factoryCourseTitle')?.value || '').trim();
+  if (!title) {
+    alert('لطفاً عنوان درس را وارد کنید.');
+    return;
+  }
+  if (!factoryProcessedPages.length) {
+    alert('لطفاً حداقل یک صفحه از جزوه را انتخاب کنید.');
+    return;
+  }
+
+  const failing = factoryProcessedPages.filter((p) => !p.isAcceptable);
+  if (failing.length > 0) {
+    const pagesStr = failing.map((p) => p.pageNum).join('، ');
+    alert(`کیفیت گیت کنترل رد شد: صفحه(های) ${pagesStr} مات یا دارای نور نامناسب هستند. لطفاً مجدداً عکس بگیرید.`);
+    return;
+  }
+
+  const btn = document.getElementById('factoryProcessBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ در حال ترنسکریپشن ۴-پاس و اعتبارسنجی KaTeX...';
+  }
+
+  try {
+    const data = await api('/api/factory/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        pages: factoryProcessedPages
+      })
+    });
+
+    if (!data.ok) {
+      if (data.code === 'DUPLICATE_SOURCE') {
+        alert('⚠️ تصویر ارسالی قبلاً توسط جزوه‌نویس دیگری منتشر شده یا در دست بررسی است (نقض کپی‌رایت).');
+        return;
+      }
+      if (data.code === 'QUALITY_GATE_FAILED') {
+        alert(`کیفیت تصویر رد شد: صفحات ${(data.retakePages || []).join('، ')} نیاز به عکاسی مجدد دارند.`);
+        return;
+      }
+      alert(data.message || 'خطا در ثبت و پردازش کارخانه.');
+      return;
+    }
+
+    activeFactoryJob = {
+      id: data.jobId,
+      draft: data.draft,
+      validationReport: data.validationReport
+    };
+
+    renderFactoryReviewSection();
+  } catch (err) {
+    alert(err?.message || 'خطا در پردازش جزوه.');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⚡ پردازش با پایپ‌لاین ۴-پاس هوش مصنوعی';
+    }
+  }
+};
+
+function renderFactoryReviewSection() {
+  const uploadSec = document.getElementById('factoryUploadSection');
+  const reviewSec = document.getElementById('factoryReviewSection');
+  if (uploadSec) uploadSec.style.display = 'none';
+  if (reviewSec) reviewSec.style.display = 'block';
+
+  const draft = activeFactoryJob?.draft;
+  const rep = activeFactoryJob?.validationReport;
+  const summaryEl = document.getElementById('factoryGroundingSummary');
+
+  if (summaryEl) {
+    const flagged = rep?.flaggedCount || 0;
+    if (flagged > 0) {
+      summaryEl.innerHTML = `⚠️ <strong>توجه مؤلف:</strong> تعداد ${flagged} مورد نیازمند بازبینی تطابق عددی با دست‌نویس مشخص شده است. لطفاً کارت‌های نارنجی را بررسی و اصلاح کنید.`;
+      summaryEl.style.color = '#fbbf24';
+      summaryEl.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+    } else {
+      summaryEl.innerHTML = `✅ <strong>همه کارت‌ها ۱۰۰٪ با دست‌نویس منبع تطابق دارند و فرمول‌ها در KaTeX تایید شدند.</strong> می‌توانید منتشر کنید.`;
+      summaryEl.style.color = '#34d399';
+      summaryEl.style.borderColor = 'rgba(52, 211, 153, 0.4)';
+    }
+  }
+
+  const listEl = document.getElementById('factoryCardsReviewList');
+  if (!listEl || !draft) return;
+
+  const cardsHtml = (draft.flashcards || []).map((fc, idx) => {
+    const isNeedsReview = Boolean(fc.needsReview);
+    return `
+      <div style="background:#1e293b; border:1px solid ${isNeedsReview ? '#f59e0b' : '#334155'}; border-radius:8px; padding:10px; margin-bottom:8px; cursor:pointer;" onclick="tapToFixCard(${idx}, 'flashcard')">
+        <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:#94a3b8; margin-bottom:4px;">
+          <span>فلش‌کارت ${idx + 1} (صفحه ${fc.source_page || 1})</span>
+          ${isNeedsReview ? '<span style="color:#fbbf24; font-weight:700;">⚠️ نیازمند بازبینی</span>' : '<span style="color:#34d399;">✅ تایید شده</span>'}
+        </div>
+        <div style="font-size:0.8rem; font-weight:600; margin-bottom:4px;">${renderTextWithMath(fc.front)}</div>
+        <div style="font-size:0.76rem; color:#cbd5e1;">${renderTextWithMath(fc.back)}</div>
+        ${fc.reviewReason ? `<div style="font-size:0.68rem; color:#fca5a5; margin-top:4px;">دلیل پرچم: ${escapeHtml(fc.reviewReason)}</div>` : ''}
+        <div style="font-size:0.68rem; color:#38bdf8; margin-top:6px;">👆 برای ویرایش یا تغییر فرمول کلیک کنید (Tap-to-Fix)</div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.innerHTML = cardsHtml;
+}
+
+window.tapToFixCard = function (idx, type) {
+  if (!activeFactoryJob?.draft) return;
+  const draft = activeFactoryJob.draft;
+  if (type === 'flashcard') {
+    const fc = draft.flashcards[idx];
+    const newFront = prompt('ویرایش روی کارت (پرسش):', fc.front);
+    if (newFront === null) return;
+    const newBack = prompt('ویرایش پشت کارت (پاسخ تشریحی و فرمول):', fc.back);
+    if (newBack === null) return;
+
+    fc.front = newFront;
+    fc.back = newBack;
+    fc.needsReview = false;
+    fc.reviewReason = '';
+    renderFactoryReviewSection();
+  }
+};
+
+window.publishCurrentFactoryJobFromUi = async function () {
+  if (!activeFactoryJob?.id) return;
+  const btn = document.getElementById('factoryPublishBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ در حال انتشار در کاتالوگ جزوات...';
+  }
+
+  try {
+    const data = await api(`/api/factory/jobs/${activeFactoryJob.id}/publish`, {
+      method: 'POST',
+      body: JSON.stringify({ draft: activeFactoryJob.draft })
+    });
+
+    if (data && data.ok) {
+      alert('🎉 جزوه شما با موفقیت تایید و در کاتالوگ عمومی منتشر شد!');
+      closeFactoryStudioModal();
+      await fetchCatalog();
+      if (data.courseSlug) switchCourse(data.courseSlug);
+    } else {
+      alert(data?.message || 'خطا در انتشار جزوه.');
+    }
+  } catch (err) {
+    alert(err?.message || 'خطا در ارتباط با سرور هنگام انتشار.');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🚀 تایید و انتشار نهایی در کاتالوگ جزوات';
+    }
+  }
+};
+
+// چک کردن پارامتر URL جهت باز شدن مستقیم پیش‌نویس برای بررسی (مانند لینک تلگرام)
+window.checkUrlForFactoryReview = async function () {
+  const urlParams = new URLSearchParams(window.location.search);
+  const factoryJobId = urlParams.get('factoryJob');
+  if (!factoryJobId) return;
+
+  try {
+    const data = await api(`/api/factory/jobs/${encodeURIComponent(factoryJobId)}`);
+    if (data && data.ok && data.job) {
+      activeFactoryJob = {
+        id: data.job.id,
+        draft: data.job.draft,
+        validationReport: data.job.validationReport
+      };
+      openFactoryStudioModal();
+      renderFactoryReviewSection();
+    }
+  } catch (_) {}
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   const inp = document.getElementById('examImageInput');
   if (inp) inp.addEventListener('change', handleExamImageSelected);
+  setTimeout(() => window.checkUrlForFactoryReview(), 500);
 });
-
 
 document.addEventListener('DOMContentLoaded', initStudyPlayer);

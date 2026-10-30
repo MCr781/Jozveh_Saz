@@ -163,8 +163,8 @@
             <span class="stat-lbl">موجودی قابل تسویه</span>
           </div>
         </div>
-        <div class="creator-cta-row">
-          <span>🤖 ارسال فایل PDF در تلگرام جهت انتشار خودکار ←</span>
+        <div class="creator-cta-row" onclick="openFactoryStudioModal()" style="cursor:pointer;">
+          <span>🏭 استودیو جزوه‌نویس: تبدیل عکس جزوه با هوش مصنوعی ۲.۰ ←</span>
         </div>
       </div>
 
@@ -261,6 +261,52 @@
       <button class="unlock-btn-primary" id="submitReportBtn" onclick="submitVerifiedReport()" style="width:100%; margin-top:0;">
         ارسال برای صحت‌سنجی هوشمند
       </button>
+    </div>
+  </div>
+
+  <!-- Factory 2.0 Studio Modal -->
+  <div class="modal-backdrop" id="factoryStudioBackdrop">
+    <div class="bottom-sheet" style="max-height:92vh; overflow-y:auto;">
+      <div class="sheet-header">
+        <div>
+          <strong style="font-size:0.95rem; color:#38bdf8;">🏭 استودیو جزوه‌نویس (Factory 2.0)</strong>
+          <div style="font-size:0.72rem; color:#94a3b8;">تبدیل هوشمند دست‌نویس به فلش‌کارت و شبیه‌ساز امتحان</div>
+        </div>
+        <button class="close-sheet-btn" onclick="closeFactoryStudioModal()">✕</button>
+      </div>
+
+      <!-- Section A: Upload & Client Quality Gate -->
+      <div id="factoryUploadSection">
+        <div style="margin-bottom:12px;">
+          <label style="font-size:0.78rem; color:#cbd5e1; display:block; margin-bottom:4px;">عنوان درس یا جزوه:</label>
+          <input type="text" class="chat-text-input" id="factoryCourseTitle" placeholder="مثال: فیزیک ۲ - مغناطیس و القا" style="width:100%;" />
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label style="font-size:0.78rem; color:#cbd5e1; display:block; margin-bottom:4px;">انتخاب عکس‌های جزوه (برگه‌های دست‌نویس):</label>
+          <input type="file" id="factoryFilesInput" multiple accept="image/*" class="chat-text-input" style="width:100%; font-size:0.76rem;" onchange="handleFactoryFilesChange(this.files)" />
+        </div>
+
+        <!-- Real-time Quality Checks List -->
+        <div id="factoryPagesPreview" style="margin-bottom:12px;"></div>
+
+        <button class="unlock-btn-primary" id="factoryProcessBtn" onclick="submitFactoryJobFromUi()" style="width:100%; margin-top:0; display:none;">
+          ⚡ پردازش با پایپ‌لاین ۴-پاس هوش مصنوعی
+        </button>
+      </div>
+
+      <!-- Section B: Mandatory Human Review & Tap-to-Fix -->
+      <div id="factoryReviewSection" style="display:none;">
+        <div style="font-size:0.78rem; color:#a5b4fc; background:rgba(99, 102, 241, 0.1); border:1px solid rgba(99, 102, 241, 0.3); padding:8px 10px; border-radius:8px; margin-bottom:10px;" id="factoryGroundingSummary">
+          🔍 صف بازبینی الزامی مؤلف: کارت‌ها را بررسی کنید. برای ویرایش هر کارت روی آن کلیک کنید.
+        </div>
+
+        <div id="factoryCardsReviewList" style="margin-bottom:14px;"></div>
+
+        <button class="unlock-btn-primary" id="factoryPublishBtn" onclick="publishCurrentFactoryJobFromUi()" style="width:100%; margin-top:0;">
+          🚀 تایید و انتشار نهایی در کاتالوگ جزوات
+        </button>
+      </div>
     </div>
   </div>
 

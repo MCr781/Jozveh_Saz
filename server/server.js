@@ -14,6 +14,8 @@ import * as aiRepo from './repo/ai.js';
 import * as progressRepo from './repo/progress.js';
 import * as reportsRepo from './repo/reports.js';
 import * as inboxRepo from './repo/inbox.js';
+import * as factoryRepo from './repo/factory.js';
+import { runQualityGate, runFactoryPipeline, validateCoursePackage, sanitizeCoursePackage } from '../factory/generate.js';
 import { tgApi, notifyTelegram } from './telegram.js';
 import { requireUser, optionalUser, verifyInitData as authVerifyInitData, extractInitDataRaw, HttpError } from './auth.js';
 import { triggerTelegramBackupIfConfigured } from '../scripts/backup.js';
@@ -24,7 +26,7 @@ const __dirname = path.dirname(__filename);
 export { loadEnvFile, getEnv } from './env.js';
 export { tgApi, notifyTelegram } from './telegram.js';
 export { requireUser, optionalUser, HttpError } from './auth.js';
-export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo, inboxRepo };
+export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo, inboxRepo, factoryRepo };
 export { triggerTelegramBackupIfConfigured };
 
 export function escapeHtml(text) {
@@ -673,6 +675,9 @@ export const server = http.createServer(async (req, res) => {
       try {
         const data = item.data;
         const slug = item.slug;
+        if (factoryRepo.isCourseTakedown(db, data.id) || factoryRepo.isCourseTakedown(db, slug)) {
+          continue;
+        }
         const isPurchased = userId ? (commerceRepo.hasPurchased(db, userId, data.id) || Boolean(DB.purchases[`${userId}_${data.id}`])) : false;
 
         catalog.push({
@@ -734,9 +739,9 @@ export const server = http.createServer(async (req, res) => {
     const courseIdParam = url.searchParams.get('id') || 'sample_course';
     const found = findCourseFile(courseIdParam);
 
-    if (!found) {
+    if (!found || factoryRepo.isCourseTakedown(db, found.data?.id) || factoryRepo.isCourseTakedown(db, found.slug)) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ ok: false, message: 'جزوه مورد نظر یافت نشد.' }));
+      res.end(JSON.stringify({ ok: false, code: 'COURSE_TAKEDOWN', message: 'جزوه مورد نظر یافت نشد یا به دلیل بررسی حقوق مالکیت از دسترس خارج شده است.' }));
       return;
     }
 
@@ -1570,6 +1575,329 @@ export const server = http.createServer(async (req, res) => {
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'Internal server error processing webhook.' }));
+      }
+    })();
+    return;
+  }
+
+  // ===== Factory 2.0 & Takedown Endpoints =====
+
+  // ۱. ثبت درخواست حذف محتوا (Content Takedown)
+  if (req.method === 'POST' && url.pathname === '/api/takedown') {
+    (async () => {
+      try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 65536);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
+        let parsed = {};
+        try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
+        const { courseId, reason } = parsed;
+
+        if (!courseId || typeof courseId !== 'string' || !reason || typeof reason !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'شناسه درس و دلیل گزارش الزامی است.' }));
+          return;
+        }
+
+        const rawAuth = getRawInitData(req);
+        let reporterId = 'anonymous';
+        if (rawAuth) {
+          const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+          if (auth.valid) reporterId = String(auth.user.id);
+        }
+
+        const takedownId = `td_${crypto.randomUUID()}`;
+        factoryRepo.createTakedownRequest(db, {
+          id: takedownId,
+          courseId: courseId.trim(),
+          reporterId,
+          reason: reason.trim()
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, takedownId, status: 'pending', message: 'گزارش شما ثبت شد و در صف بررسی قرار گرفت.' }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای سرور در ثبت گزارش تخلف.' }));
+      }
+    })();
+    return;
+  }
+
+  // ۲. ایجاد پردازش کارخانه جزوه (POST /api/factory/jobs)
+  if (req.method === 'POST' && url.pathname === '/api/factory/jobs') {
+    (async () => {
+      try {
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+        if (!auth.valid) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+
+        const creatorId = String(auth.user.id);
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 10 * 1024 * 1024);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
+        let parsed = {};
+        try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
+        const { courseSlug, title, category, priceToman, tokenBudget, pages } = parsed;
+
+        if (!title || typeof title !== 'string' || !Array.isArray(pages) || pages.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'عنوان جزوه و حداقل یک صفحه الزامی است.' }));
+          return;
+        }
+
+        const slug = (courseSlug && /^[A-Za-z0-9_-]{3,60}$/.test(courseSlug))
+          ? courseSlug
+          : `course_${Date.now()}`;
+
+        // بررسی کپی‌رایت و فایل تکراری از طریق dHash و SHA-256
+        for (const p of pages) {
+          const dup = factoryRepo.checkDuplicateSource(db, {
+            imageSha256: p.imageSha256,
+            dhash: p.dhash,
+            creatorId
+          });
+          if (dup.duplicate) {
+            res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({
+              ok: false,
+              code: 'DUPLICATE_SOURCE',
+              message: 'تصویر ارسالی قبلاً توسط جزوه‌نویس دیگری منتشر شده یا در دست بررسی است.',
+              details: dup
+            }));
+            return;
+          }
+        }
+
+        // گیت کنترل کیفیت تصویر
+        const qg = runQualityGate(pages);
+        if (!qg.ok) {
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            ok: false,
+            code: 'QUALITY_GATE_FAILED',
+            message: 'برخی صفحات کیفیت لازم برای خوانش هوش مصنوعی را ندارند (مات یا نور نامناسب).',
+            retakePages: qg.retakePages,
+            reasons: qg.reasons
+          }));
+          return;
+        }
+
+        const jobId = `job_${crypto.randomUUID()}`;
+        factoryRepo.createFactoryJob(db, {
+          id: jobId,
+          creatorId,
+          courseSlug: slug,
+          title: title.trim(),
+          category: category || 'دروس عمومی مهندسی',
+          priceToman: Number(priceToman) >= 0 ? Number(priceToman) : 59000,
+          tokenBudget: Number(tokenBudget) || 60000
+        });
+
+        factoryRepo.addFactoryPages(db, jobId, pages);
+
+        // اجرای پایپ‌لاین ۴-پاس
+        const pipelineResult = await runFactoryPipeline({
+          courseSlug: slug,
+          title: title.trim(),
+          instructor: 'منطبق بر جزوه کلاسی',
+          creator: auth.user.first_name || auth.user.username || 'جزوه‌نویس',
+          creatorTelegramId: creatorId,
+          category: category || 'دروس عمومی مهندسی',
+          priceToman: Number(priceToman) >= 0 ? Number(priceToman) : 59000,
+          tokenBudget: Number(tokenBudget) || 60000,
+          pages
+        });
+
+        // ذخیره پیش‌نویس در حالت human_review (هرگز خودکار منتشر نمی‌شود)
+        factoryRepo.saveJobDraft(db, jobId, {
+          draftJson: pipelineResult.draft,
+          validationReport: pipelineResult.validationReport,
+          tokensUsed: pipelineResult.tokensUsed,
+          state: 'human_review'
+        });
+
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          ok: true,
+          jobId,
+          state: 'human_review',
+          courseSlug: slug,
+          validationReport: pipelineResult.validationReport,
+          draft: pipelineResult.draft
+        }));
+      } catch (err) {
+        console.error('Factory job error:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای سرور در پردازش صفحات جزوه.' }));
+      }
+    })();
+    return;
+  }
+
+  // 3. لیست کارهای کارخانه (GET /api/factory/jobs)
+  if (req.method === 'GET' && url.pathname === '/api/factory/jobs') {
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
+
+    const userId = String(auth.user.id);
+    const isAdmin = userId === String(process.env.ADMIN_CHAT_ID || '');
+    const jobs = factoryRepo.listFactoryJobs(db, isAdmin ? null : userId);
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, jobs }));
+    return;
+  }
+
+  // 4. جزئیات کار کارخانه (GET /api/factory/jobs/:id)
+  const jobDetailMatch = url.pathname.match(/^\/api\/factory\/jobs\/([a-zA-Z0-9_\-]+)$/);
+  if (req.method === 'GET' && jobDetailMatch) {
+    const rawAuth = getRawInitData(req);
+    const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+    if (!auth.valid) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+      return;
+    }
+
+    const jobId = jobDetailMatch[1];
+    const job = factoryRepo.getFactoryJob(db, jobId);
+    if (!job) {
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'کار مورد نظر یافت نشد.' }));
+      return;
+    }
+
+    const userId = String(auth.user.id);
+    const isAdmin = userId === String(process.env.ADMIN_CHAT_ID || '');
+    if (job.creator_id !== userId && !isAdmin) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'دسترسی غیرمجاز.' }));
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, job }));
+    return;
+  }
+
+  // 5. تایید و انتشار نهایی توسط جزوه‌نویس (POST /api/factory/jobs/:id/publish)
+  const jobPublishMatch = url.pathname.match(/^\/api\/factory\/jobs\/([a-zA-Z0-9_\-]+)\/publish$/);
+  if (req.method === 'POST' && jobPublishMatch) {
+    (async () => {
+      try {
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+        if (!auth.valid) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+
+        const jobId = jobPublishMatch[1];
+        const job = factoryRepo.getFactoryJob(db, jobId);
+        if (!job) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'کار مورد نظر یافت نشد.' }));
+          return;
+        }
+
+        const userId = String(auth.user.id);
+        const isAdmin = userId === String(process.env.ADMIN_CHAT_ID || '');
+        if (job.creator_id !== userId && !isAdmin) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'دسترسی غیرمجاز.' }));
+          return;
+        }
+
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 1024 * 1024);
+        } catch (_) {}
+
+        let draftToPublish = job.draft;
+        if (bodyRaw) {
+          try {
+            const parsed = JSON.parse(bodyRaw);
+            if (parsed.draft) draftToPublish = parsed.draft;
+            else if (parsed.summary_cheat_sheet || parsed.flashcards) draftToPublish = parsed;
+          } catch (_) {}
+        }
+
+        if (!draftToPublish) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'پیش‌نویس جزوه جهت انتشار یافت نشد.' }));
+          return;
+        }
+
+        // بررسی اعتبارسنجی پکیج و فرمول‌ها
+        const val = validateCoursePackage(draftToPublish);
+        if (!val.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            ok: false,
+            message: 'اعتبارسنجی پکیج رد شد (فرمول معیوب یا ساختار نامعتبر).',
+            errors: val.errors,
+            latexErrors: val.latexErrors
+          }));
+          return;
+        }
+
+        // ایمن‌سازی متن‌ها در برابر XSS
+        const sanitized = sanitizeCoursePackage(draftToPublish);
+
+        // ذخیره فیزیکی فایل جزوه در server/content
+        const contentDir = getContentDir();
+        fs.mkdirSync(contentDir, { recursive: true });
+        const filePath = path.join(contentDir, `${job.course_slug}.json`);
+        const tmpPath = `${filePath}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(sanitized, null, 2), 'utf8');
+        fs.renameSync(tmpPath, filePath);
+
+        // تخلیه کش کاتالوگ تا بلافاصله در /api/courses دیده شود
+        catalogCache = null;
+
+        // به‌روزرسانی وضعیت در SQLite به published
+        factoryRepo.approveAndPublishJob(db, jobId, sanitized);
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          ok: true,
+          state: 'published',
+          courseSlug: job.course_slug,
+          message: 'جزوه با موفقیت منتشر شد و در کاتالوگ قرار گرفت.'
+        }));
+      } catch (err) {
+        console.error('Publish job error:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای سرور در انتشار جزوه.' }));
       }
     })();
     return;

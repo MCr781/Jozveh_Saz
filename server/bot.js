@@ -9,9 +9,10 @@ import * as commerceRepo from './repo/commerce.js';
 import * as reportsRepo from './repo/reports.js';
 import * as aiRepo from './repo/ai.js';
 import * as inboxRepo from './repo/inbox.js';
+import * as factoryRepo from './repo/factory.js';
 import { isValidSheba, getShebaBankName } from './sheba.js';
 import { config } from './config.js';
-import { generateCoursePackage } from '../factory/generate.js';
+import { generateCoursePackage, runQualityGate, runFactoryPipeline } from '../factory/generate.js';
 import { triggerTelegramBackupIfConfigured } from '../scripts/backup.js';
 
 export { tgApi, notifyTelegram } from './telegram.js';
@@ -240,6 +241,82 @@ export function startReviewReminderScheduler() {
   return reviewReminderTimer;
 }
 
+export const mediaGroupDebouncers = new Map();
+
+export async function processAlbumIntake(group) {
+  const { chatId, photos, caption } = group;
+  const webappUrl = getWebappUrl();
+  const uploadsDir = path.join(__dirname, 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+
+  await notifyTelegram(
+    chatId,
+    `⏳ تعداد ${photos.length} تصویر جزوه دریافت شد! در حال دانلود و ارزیابی کیفیت...`
+  );
+
+  const pages = [];
+  try {
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      const localFile = path.join(uploadsDir, `album_${group.mediaGroupId}_p${i + 1}.jpg`);
+      await downloadTelegramFile(p.fileId, localFile);
+      const buffer = fs.readFileSync(localFile);
+      const sha = crypto.createHash('sha256').update(buffer).digest('hex');
+      const dhash = crypto.createHash('md5').update(buffer).digest('hex').slice(0, 16);
+
+      pages.push({
+        pageNum: i + 1,
+        imageSha256: sha,
+        dhash,
+        blurScore: 50.0,
+        exposureScore: 120.0,
+        localFile
+      });
+    }
+
+    const courseSlug = `course_${Date.now()}`;
+    const title = caption || `جزوه دست‌نویس ${new Date().toLocaleDateString('fa-IR')}`;
+    const jobId = `job_${crypto.randomUUID()}`;
+
+    factoryRepo.createFactoryJob(db, {
+      id: jobId,
+      creatorId: chatId,
+      courseSlug,
+      title,
+      category: 'دروس عمومی مهندسی',
+      priceToman: 59000
+    });
+    factoryRepo.addFactoryPages(db, jobId, pages);
+
+    const pipelineResult = await runFactoryPipeline({
+      courseSlug,
+      title,
+      instructor: 'منطبق بر جزوه کلاسی',
+      creator: 'جزوه‌نویس تلگرام',
+      creatorTelegramId: chatId,
+      pages
+    });
+
+    factoryRepo.saveJobDraft(db, jobId, {
+      draftJson: pipelineResult.draft,
+      validationReport: pipelineResult.validationReport,
+      tokensUsed: pipelineResult.tokensUsed,
+      state: 'human_review'
+    });
+
+    await notifyTelegram(
+      chatId,
+      `✅ <b>پیش‌نویس جزوه آماده بررسی شد!</b>\n` +
+      `📚 عنوان: <b>${escapeHtml(title)}</b>\n` +
+      `صفحات: <b>${pages.length} برگه</b>\n\n` +
+      `جهت بررسی و انتشار نهایی روی دکمه زیر بزنید:`,
+      [[{ text: '✏️ بررسی و انتشار در مینی‌اپ', web_app: { url: `${webappUrl}/?factoryJob=${jobId}` } }]]
+    );
+  } catch (err) {
+    console.error('Album intake error:', err);
+    await notifyTelegram(chatId, `❌ خطا در پردازش آلبوم جزوه: ${err.message}`);
+  }
+}
 
 export async function handleUpdate(update) {
   if (!update || typeof update !== 'object') return { ok: false, reason: 'empty_update' };
@@ -678,6 +755,32 @@ async function processUpdate(update) {
     } catch (err) {
       await notifyTelegram(chatId, `❌ خطا در ساخت خودکار جزوه: ${err.message}`);
     }
+    return;
+  }
+
+  // ۴.۵ اگر کاربر آلبوم عکس بفرستد (چندین عکس با media_group_id یکسان) -> با تاخیر ۳ ثانیه‌ای تجمیع می‌شود
+  if (msg.photo && msg.media_group_id) {
+    const mgId = String(msg.media_group_id);
+    const bestPhoto = msg.photo[msg.photo.length - 1];
+    let group = mediaGroupDebouncers.get(mgId);
+    if (!group) {
+      group = {
+        chatId,
+        mediaGroupId: mgId,
+        caption: msg.caption || '',
+        photos: [],
+        timer: null
+      };
+      mediaGroupDebouncers.set(mgId, group);
+    }
+    if (msg.caption && !group.caption) group.caption = msg.caption;
+    group.photos.push({ fileId: bestPhoto.file_id, messageId: msg.message_id });
+
+    if (group.timer) clearTimeout(group.timer);
+    group.timer = setTimeout(async () => {
+      mediaGroupDebouncers.delete(mgId);
+      await processAlbumIntake(group);
+    }, 3000);
     return;
   }
 
