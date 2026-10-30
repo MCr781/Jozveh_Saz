@@ -173,39 +173,45 @@ export async function callGeminiGenerateContent({
     }
   }
 
-  let activeModel = model;
+  const cascadeModels = Array.from(new Set([model, 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'].filter(Boolean)));
   let currentKey = apiKey;
   let lastErr = null;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
+  for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
+    const activeModel = cascadeModels[mIdx];
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await executeRequest(activeModel, currentKey);
       } catch (err) {
-        const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
-        if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
-          console.warn(`⚠️ Gemini model ${activeModel} retired/unavailable (${err.message}). Retrying once with gemini-3.8-flash...`);
-          activeModel = 'gemini-3.8-flash';
-          return await executeRequest(activeModel, currentKey);
+        lastErr = err;
+        const msg = String(err.message || '').toLowerCase();
+        const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
+        const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+
+        if (isQuotaExceeded || isModelRetired) {
+          if (mIdx < cascadeModels.length - 1) {
+            console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
+            break;
+          }
+          throw err;
+        }
+
+        const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
+        if (isHighDemand && attempt < maxAttempts - 1) {
+          console.warn(`⚠️ Gemini 503/429 high demand spike on ${activeModel} (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
+          if (effectiveRetryDelay > 0) {
+            await new Promise((r) => setTimeout(r, effectiveRetryDelay));
+          }
+          currentKey = getNextGeminiKey() || currentKey;
+          continue;
+        }
+
+        if (mIdx < cascadeModels.length - 1) {
+          console.warn(`⚠️ Model ${activeModel} failed after ${attempt + 1} attempts. Cascading to ${cascadeModels[mIdx + 1]}...`);
+          break;
         }
         throw err;
       }
-    } catch (err) {
-      lastErr = err;
-      const isHighDemand = err.status === 503 || err.status === 429 || (err.message && (
-        err.message.includes('high demand') ||
-        err.message.includes('overloaded') ||
-        err.message.includes('UNAVAILABLE')
-      ));
-      if (isHighDemand && attempt < maxAttempts - 1) {
-        console.warn(`⚠️ Gemini 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
-        if (effectiveRetryDelay > 0) {
-          await new Promise((r) => setTimeout(r, effectiveRetryDelay));
-        }
-        currentKey = getNextGeminiKey() || currentKey;
-        continue;
-      }
-      throw err;
     }
   }
 
@@ -273,43 +279,70 @@ export async function callGeminiStreamGenerateContent({
     }
   }
 
-  let activeModel = model;
+  const cascadeModels = Array.from(new Set([model, 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'].filter(Boolean)));
   let currentKey = apiKey;
   let lastErr = null;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
+  for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
+    const activeModel = cascadeModels[mIdx];
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await executeStream(activeModel, currentKey);
       } catch (err) {
-        const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
-        if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
-          console.warn(`⚠️ Gemini model ${activeModel} retired/unavailable. Retrying once with gemini-3.8-flash...`);
-          activeModel = 'gemini-3.8-flash';
-          return await executeStream(activeModel, currentKey);
+        lastErr = err;
+        const msg = String(err.message || '').toLowerCase();
+        const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
+        const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+
+        if (isQuotaExceeded || isModelRetired) {
+          if (mIdx < cascadeModels.length - 1) {
+            console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
+            break;
+          }
+          throw err;
+        }
+
+        const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
+        if (isHighDemand && attempt < maxAttempts - 1) {
+          console.warn(`⚠️ Gemini stream 503/429 high demand spike on ${activeModel} (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
+          if (effectiveRetryDelay > 0) {
+            await new Promise((r) => setTimeout(r, effectiveRetryDelay));
+          }
+          currentKey = getNextGeminiKey() || currentKey;
+          continue;
+        }
+
+        if (mIdx < cascadeModels.length - 1) {
+          console.warn(`⚠️ Model ${activeModel} failed stream after ${attempt + 1} attempts. Cascading to ${cascadeModels[mIdx + 1]}...`);
+          break;
         }
         throw err;
       }
-    } catch (err) {
-      lastErr = err;
-      const isHighDemand = err.status === 503 || err.status === 429 || (err.message && (
-        err.message.includes('high demand') ||
-        err.message.includes('overloaded') ||
-        err.message.includes('UNAVAILABLE')
-      ));
-      if (isHighDemand && attempt < maxAttempts - 1) {
-        console.warn(`⚠️ Gemini stream 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
-        if (effectiveRetryDelay > 0) {
-          await new Promise((r) => setTimeout(r, effectiveRetryDelay));
-        }
-        currentKey = getNextGeminiKey() || currentKey;
-        continue;
-      }
-      throw err;
     }
   }
 
   throw lastErr || new Error('Stream request failed');
+}
+
+export function chunkTextForSse(text) {
+  if (!text) return [];
+  const tokens = String(text).match(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\s+|\S+\s*)/g) || [String(text)];
+  const chunks = [];
+  let current = '';
+  let count = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    current += tokens[i];
+    if (tokens[i].trim()) count++;
+    if (count >= 2 || i === tokens.length - 1) {
+      if (current) {
+        chunks.push(current);
+        current = '';
+        count = 0;
+      }
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' } = {}) {
@@ -317,13 +350,33 @@ export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' 
   const cleanQ = String(question || '').trim();
 
   // استخراج فرمول‌های ریاضی KaTeX ($...$ یا $$...$$)
-  const formulas = [];
+  const rawFormulas = [];
   const formulaRegex = /\$\$([\s\S]+?)\$\$|\$([^\$]+?)\$/g;
   let match;
   while ((match = formulaRegex.exec(cleanContext)) !== null) {
     const f = match[0].trim();
-    if (!formulas.includes(f)) formulas.push(f);
+    if (!rawFormulas.includes(f)) rawFormulas.push(f);
   }
+
+  // اگر فرمول با دلار یافت نشد، بررسی معادلات بدون علامت دلار
+  if (rawFormulas.length === 0) {
+    const eqMatches = cleanContext.match(/([a-zA-Z\\][a-zA-Z0-9_^\s\\+\-*=/]+=[a-zA-Z0-9_^\s\\+\-*=/]+)/g);
+    if (eqMatches) {
+      for (const eq of eqMatches) {
+        const trimmed = eq.trim();
+        if (trimmed.length >= 3 && !rawFormulas.includes(trimmed)) {
+          rawFormulas.push(trimmed);
+        }
+      }
+    }
+  }
+
+  // اطمینان ۱۰۰٪ از احاطه شدن هر فرمول در $...$
+  const formulas = rawFormulas.map(f => {
+    const t = f.trim();
+    if (t.startsWith('$')) return t;
+    return `$${t}$`;
+  });
 
   // استخراج عنوان و سرنخ‌های کلیدی از متن کارت
   const firstLine = cleanContext
@@ -346,7 +399,7 @@ export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' 
   if (isExample) {
     part1 = `برای حل مسائل مربوط به **${topic}**، ابتدا باید داده‌های معلوم مسئله را تفکیک کرده و مجهول خواسته شده را در فرمول اصلی مشخص کنیم.`;
     if (formulas.length > 0) {
-      part2 = `رابطه محاسباتی استاد: ${formulas.join(' و ')}\n` +
+      part2 = `رابطه محاسباتی استاد: ${formulas.join(' و ')}\n\n` +
         `روش حل گام‌به‌گام: با جایگذاری مقادیر استاندارد در رابطه بالا، مجهول مورد نظر به دست می‌آید.`;
     } else {
       part2 = `روش محاسباتی: مقادیر داده‌شده را در شرایط تعادل سیستم قرار داده و متغیر هدف را استخراج کنید.`;
@@ -355,7 +408,7 @@ export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' 
   } else if (isTrap) {
     part1 = `در مبحث **${topic}**، معمولاً طراحان از تغییر شرایط مرزی یا تعریف غیرمستقیم متغیرها برای تست دقت دانشجو استفاده می‌کنند.`;
     if (formulas.length > 0) {
-      part2 = `روابط دارای پیش‌شرط: ${formulas.join(' و ')}\n` +
+      part2 = `روابط دارای پیش‌شرط: ${formulas.join(' و ')}\n\n` +
         `این فرمول تنها در فرآیندهای معین با شرایط مشخص صدق می‌کند و نباید در حالت عمومی تعمیم داده شود.`;
     } else {
       part2 = `روابط کلیدی تنها در فرض‌های اولیه مشخص‌شده در جزوه استاد دارای اعتبار هستند.`;
@@ -364,7 +417,7 @@ export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' 
   } else {
     part1 = `مفهوم بنیادین **${topic}** به بیان ساده این است که تغییرات در متغیرهای سیستم، مستقیماً طبق قوانین این بخش، نتیجه نهایی را تعیین می‌کند.`;
     if (formulas.length > 0) {
-      part2 = `فرمول کلیدی استاد: ${formulas.join(' و ')}\n` +
+      part2 = `فرمول کلیدی استاد: ${formulas.join(' و ')}\n\n` +
         `این رابطه نحوه تغییرات متغیر اصلی را نسبت به سایر پارامترها در آزمون توصیف می‌کند.`;
     } else {
       part2 = `نکته کلیدی جزوه: بررسی ارتباط علت و معلولی میان متغیرهای معرفی‌شده، کلید پاسخ به سوالات این مبحث است.`;
@@ -374,9 +427,9 @@ export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' 
 
   const sections = [
     `💡 **تحلیل مستند به جزوه استاد:**`,
-    `**۱. توضیح ساده و خودمانی نکته:**\n${part1}`,
-    `**۲. رابطه و کاربرد امتحانی:**\n${part2}`,
-    `**۳. دام تستی و نکته کلیدی استاد:**\n${part3}`
+    `**۱. توضیح ساده و خودمانی نکته:**\n\n${part1}`,
+    `**۲. رابطه و کاربرد امتحانی:**\n\n${part2}`,
+    `**۳. دام تستی و نکته کلیدی استاد:**\n\n${part3}`
   ];
 
   return sections.join('\n\n');
@@ -1348,17 +1401,9 @@ export const server = http.createServer(async (req, res) => {
             } else {
               // Smart grounded fallback without deducting quota
               const answerText = synthesizeGroundedTutorAnswer({ question: cleanQuestion, contextText: cleanContext });
-              const words = answerText.split(/(\s+)/);
-              let chunkAcc = '';
-              let wordCount = 0;
-              for (let i = 0; i < words.length; i++) {
-                chunkAcc += words[i];
-                if (words[i].trim()) wordCount++;
-                if (wordCount >= 2 || i === words.length - 1) {
-                  res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
-                  chunkAcc = '';
-                  wordCount = 0;
-                }
+              const chunks = chunkTextForSse(answerText);
+              for (const chunk of chunks) {
+                res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
               }
               res.write('data: [DONE]\n\n');
               res.end();
@@ -1453,18 +1498,10 @@ export const server = http.createServer(async (req, res) => {
 
               deductQuotaOnce();
 
-              // تقطیع هوشمند متن به بخش‌های ۲ تا ۳ کلمه‌ای
-              const words = fullText.split(/(\s+)/);
-              let chunkAcc = '';
-              let wordCount = 0;
-              for (let i = 0; i < words.length; i++) {
-                chunkAcc += words[i];
-                if (words[i].trim()) wordCount++;
-                if (wordCount >= 2 || i === words.length - 1) {
-                  res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
-                  chunkAcc = '';
-                  wordCount = 0;
-                }
+              // تقطیع هوشمند متن با حفظ فاصله‌ها و فرمول‌های یکپارچه ریاضی
+              const chunks = chunkTextForSse(fullText);
+              for (const chunk of chunks) {
+                res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
               }
               res.write('data: [DONE]\n\n');
               res.end();
@@ -1473,17 +1510,9 @@ export const server = http.createServer(async (req, res) => {
               console.warn(`⚠️ Gemini generateContent fallback failed (${fallbackErr.message}). Activating course-grounded smart fallback...`);
               // تلاش سوم: دستیار مستند به جزوه با هزینه سهمیه صفر برای دانشجو در زمان قطعی گوگل
               const answerText = synthesizeGroundedTutorAnswer({ question: cleanQuestion, contextText: cleanContext });
-              const words = answerText.split(/(\s+)/);
-              let chunkAcc = '';
-              let wordCount = 0;
-              for (let i = 0; i < words.length; i++) {
-                chunkAcc += words[i];
-                if (words[i].trim()) wordCount++;
-                if (wordCount >= 2 || i === words.length - 1) {
-                  res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
-                  chunkAcc = '';
-                  wordCount = 0;
-                }
+              const chunks = chunkTextForSse(answerText);
+              for (const chunk of chunks) {
+                res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
               }
               res.write('data: [DONE]\n\n');
               res.end();

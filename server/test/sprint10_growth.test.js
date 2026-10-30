@@ -29,7 +29,8 @@ const {
   growthRepo,
   recordCourseSale,
   callGeminiGenerateContent,
-  synthesizeGroundedTutorAnswer
+  synthesizeGroundedTutorAnswer,
+  chunkTextForSse
 } = await import('../server.js');
 
 const { config } = await import('../config.js');
@@ -345,6 +346,74 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.ok(res.includes('**۳. دام تستی و نکته کلیدی استاد:**'));
     assert.ok(res.includes('$W = \\int P dV$'));
     assert.ok(res.includes('$Q = m c \\Delta T$'));
+  });
+
+  it('chunkTextForSse reconstructs the exact original string with spaces, newlines, and formulas 100% intact', () => {
+    const originalText = `💡 **تحلیل مستند به جزوه استاد:**\n\n` +
+      `**۱. توضیح ساده و خودمانی نکته:**\n\nبرای درک رابطه $dH = dU + PdV + VdP$ در آنتالپی، به تغییرات فشار توجه کنید.\n\n` +
+      `**۲. رابطه و کاربرد امتحانی:**\n\n$$W = \\int_{V_1}^{V_2} P \\, dV$$\n\n` +
+      `**۳. دام تستی و نکته کلیدی استاد:**\n\nعلامت منفی را در انبساط فراموش نکنید!`;
+
+    const chunks = chunkTextForSse(originalText);
+    assert.ok(chunks.length > 3, 'Should produce multiple chunks for smooth streaming');
+
+    // 1. Exact string reconstruction
+    const joined = chunks.join('');
+    assert.strictEqual(joined, originalText, 'Reconstructed chunks must exactly match original string without duplicate letters or lost spaces');
+
+    // 2. Math blocks must not be cut across chunks
+    assert.ok(chunks.some((c) => c.includes('$dH = dU + PdV + VdP$')), 'Inline math block must be contained whole inside a single chunk');
+    assert.ok(chunks.some((c) => c.includes('$$W = \\int_{V_1}^{V_2} P \\, dV$$')), 'Block math must be contained whole inside a single chunk');
+  });
+
+  it('callGeminiGenerateContent cascades to next model immediately when a model returns 429 Quota exceeded', async () => {
+    const originalFetch = global.fetch;
+    const requestedModels = [];
+
+    global.fetch = async (url, opts) => {
+      const match = String(url).match(/models\/([^:]+):generateContent/);
+      const targetModel = match ? match[1] : '';
+      requestedModels.push(targetModel);
+
+      if (targetModel === 'gemini-3.8-flash') {
+        // First model hits quota
+        return {
+          ok: false,
+          status: 429,
+          statusText: 'Too Many Requests',
+          json: async () => ({
+            error: {
+              code: 429,
+              message: 'Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash'
+            }
+          })
+        };
+      }
+
+      // Cascaded fallback model succeeds
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: `پاسخ از مدل آبشاری ${targetModel}` }] } }]
+        })
+      };
+    };
+
+    try {
+      const res = await callGeminiGenerateContent({
+        apiKey: 'test-api-key',
+        model: 'gemini-3.8-flash',
+        payload: { contents: [{ parts: [{ text: 'تست کسکید' }] }] },
+        timeoutMs: 2000
+      });
+
+      assert.ok(requestedModels.includes('gemini-3.8-flash'));
+      assert.ok(requestedModels.includes('gemini-2.5-flash-lite'));
+      assert.strictEqual(res, 'پاسخ از مدل آبشاری gemini-2.5-flash-lite');
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });
 

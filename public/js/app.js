@@ -757,49 +757,6 @@ window.closeContextualDrawer = function () {
   document.getElementById('aiDrawerBackdrop').classList.remove('open');
 };
 
-function tokenizeIntoTypewriterQueue(chunkText, tokenState, tokenQueue) {
-  tokenState.pending = (tokenState.pending || '') + chunkText;
-
-  while (tokenState.pending.length > 0) {
-    // 1. Block math $$...$$
-    if (tokenState.pending.startsWith('$$')) {
-      const closeIdx = tokenState.pending.indexOf('$$', 2);
-      if (closeIdx === -1) {
-        break; // Wait for closing $$ from next chunk
-      }
-      tokenQueue.push(tokenState.pending.slice(0, closeIdx + 2));
-      tokenState.pending = tokenState.pending.slice(closeIdx + 2);
-      continue;
-    }
-
-    // 2. Inline math $...$
-    if (tokenState.pending.startsWith('$')) {
-      const closeIdx = tokenState.pending.indexOf('$', 1);
-      if (closeIdx === -1) {
-        break; // Wait for closing $ from next chunk
-      }
-      tokenQueue.push(tokenState.pending.slice(0, closeIdx + 1));
-      tokenState.pending = tokenState.pending.slice(closeIdx + 1);
-      continue;
-    }
-
-    // 3. Plain text segment before next math delimiter
-    const nextMathIdx = tokenState.pending.indexOf('$');
-    const plain = nextMathIdx === -1 ? tokenState.pending : tokenState.pending.slice(0, nextMathIdx);
-    if (!plain) continue;
-
-    const words = plain.match(/\S+\s*/g) || [plain];
-    let consumed = 0;
-    for (let i = 0; i < words.length; i += 2) {
-      const group = (words[i] || '') + (words[i + 1] || '');
-      tokenQueue.push(group);
-      consumed += group.length;
-    }
-
-    tokenState.pending = tokenState.pending.slice(consumed);
-  }
-}
-
 async function streamTutorAnswer(payload, onChunk) {
   const apiBase = getApiBase();
   const url = `${apiBase}/api/ask-tutor`;
@@ -812,48 +769,89 @@ async function streamTutorAnswer(payload, onChunk) {
     'X-Telegram-Init-Data': getTelegramInitData()
   };
 
-  const tokenQueue = [];
-  const tokenState = { pending: '' };
-  let displayedText = '';
+  let fullReceivedText = '';
+  let renderedLength = 0;
   let isDone = false;
   const tickMs = (typeof window !== 'undefined' && window.__FAST_TEST_STREAM) ? 0 : 30;
 
   const drainPromise = new Promise((resolve) => {
     function tick() {
-      if (tokenQueue.length > 0) {
-        const tok = tokenQueue.shift();
-        displayedText += tok;
-        const isFinished = isDone && tokenQueue.length === 0;
-        if (typeof onChunk === 'function') {
-          onChunk(isFinished ? displayedText : (displayedText + ' ▍'), isFinished);
+      if (tickMs === 0) {
+        if (isDone) {
+          renderedLength = fullReceivedText.length;
+          if (typeof onChunk === 'function' && fullReceivedText) {
+            onChunk(fullReceivedText, true);
+          }
+          resolve();
+          return;
         }
+        if (renderedLength < fullReceivedText.length) {
+          renderedLength = fullReceivedText.length;
+          if (typeof onChunk === 'function' && fullReceivedText) {
+            onChunk(fullReceivedText + ' ▍', false);
+          }
+        }
+        setTimeout(tick, 0);
+        return;
       }
 
-      if (isDone && tokenQueue.length === 0) {
-        if (typeof onChunk === 'function' && displayedText) {
-          onChunk(displayedText, true);
+      if (renderedLength < fullReceivedText.length) {
+        const remaining = fullReceivedText.slice(renderedLength);
+        if (remaining.startsWith('$$')) {
+          const closeIdx = remaining.indexOf('$$', 2);
+          if (closeIdx !== -1) {
+            renderedLength += closeIdx + 2;
+          } else if (isDone) {
+            renderedLength = fullReceivedText.length;
+          } else {
+            setTimeout(tick, tickMs);
+            return;
+          }
+        } else if (remaining.startsWith('$')) {
+          const closeIdx = remaining.indexOf('$', 1);
+          if (closeIdx !== -1) {
+            renderedLength += closeIdx + 1;
+          } else if (isDone) {
+            renderedLength = fullReceivedText.length;
+          } else {
+            setTimeout(tick, tickMs);
+            return;
+          }
+        } else {
+          const m = remaining.match(/^(\s*\S+\s*)/);
+          if (m) {
+            renderedLength += m[0].length;
+          } else {
+            renderedLength = fullReceivedText.length;
+          }
+        }
+
+        const isFinished = isDone && (renderedLength >= fullReceivedText.length);
+        const currentSlice = fullReceivedText.slice(0, renderedLength);
+        if (typeof onChunk === 'function') {
+          onChunk(isFinished ? currentSlice : (currentSlice + ' ▍'), isFinished);
+        }
+
+        if (isFinished) {
+          resolve();
+          return;
+        }
+
+        setTimeout(tick, tickMs);
+        return;
+      }
+
+      if (isDone && renderedLength >= fullReceivedText.length) {
+        if (typeof onChunk === 'function' && fullReceivedText) {
+          onChunk(fullReceivedText, true);
         }
         resolve();
         return;
       }
 
-      if (tickMs === 0) {
-        while (tokenQueue.length > 0) {
-          const tok = tokenQueue.shift();
-          displayedText += tok;
-        }
-        if (isDone) {
-          if (typeof onChunk === 'function' && displayedText) {
-            onChunk(displayedText, true);
-          }
-          resolve();
-          return;
-        }
-        setTimeout(tick, 0);
-      } else {
-        setTimeout(tick, tickMs);
-      }
+      setTimeout(tick, tickMs);
     }
+
     tick();
   });
 
@@ -881,14 +879,10 @@ async function streamTutorAnswer(payload, onChunk) {
         };
       }
       if (data?.reply) {
-        tokenizeIntoTypewriterQueue(data.reply, tokenState, tokenQueue);
+        fullReceivedText = data.reply;
         isDone = true;
-        if (tokenState.pending) {
-          tokenQueue.push(tokenState.pending);
-          tokenState.pending = '';
-        }
         await drainPromise;
-        return { ...data, reply: displayedText };
+        return { ...data, reply: fullReceivedText };
       }
       return data;
     }
@@ -916,7 +910,7 @@ async function streamTutorAnswer(payload, onChunk) {
               try {
                 const parsed = JSON.parse(dataStr);
                 if (parsed.chunk) {
-                  tokenizeIntoTypewriterQueue(parsed.chunk, tokenState, tokenQueue);
+                  fullReceivedText += parsed.chunk;
                 }
               } catch (_) {}
             }
@@ -925,24 +919,15 @@ async function streamTutorAnswer(payload, onChunk) {
       }
 
       isDone = true;
-      if (tokenState.pending) {
-        tokenQueue.push(tokenState.pending);
-        tokenState.pending = '';
-      }
-
       await drainPromise;
-      return { ok: true, reply: displayedText, streamed: true };
+      return { ok: true, reply: fullReceivedText, streamed: true };
     }
 
     const text = await res.text();
-    tokenizeIntoTypewriterQueue(text, tokenState, tokenQueue);
+    fullReceivedText = text;
     isDone = true;
-    if (tokenState.pending) {
-      tokenQueue.push(tokenState.pending);
-      tokenState.pending = '';
-    }
     await drainPromise;
-    return { ok: true, reply: displayedText };
+    return { ok: true, reply: fullReceivedText };
   } catch (err) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
