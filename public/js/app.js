@@ -11,6 +11,7 @@ const AppState = {
   isProUnlocked: false,
   aiRemainingFree: 3,
   activeContextItem: null,
+  contextualItem: null,
   creatorStats: { balanceToman: 0, salesCount: 0 }
 };
 
@@ -177,11 +178,15 @@ function getItemById(itemId) {
   if (!AppState.course) return null;
   const s = (AppState.course.summary_cheat_sheet || []).find((x) => x.id === itemId);
   if (s) {
+    const tip = s.key_takeaway || s.exam_trap || (Array.isArray(s.key_points) ? s.key_points.join(' ') : '') || '';
     return {
       itemId: s.id,
       originalText: `${s.topic} ${s.formula_latex || ''}`,
       sourcePage: s.source_page,
-      label: s.topic
+      label: s.topic,
+      title: s.topic,
+      formula: s.formula_latex || '',
+      tip
     };
   }
   const f = (AppState.course.flashcards || []).find((x) => x.id === itemId);
@@ -190,7 +195,10 @@ function getItemById(itemId) {
       itemId: f.id,
       originalText: `${f.front} - ${f.back}`,
       sourcePage: f.source_page,
-      label: f.front.slice(0, 45) + '...'
+      label: f.front.slice(0, 45) + '...',
+      title: f.front,
+      formula: f.formula || '',
+      tip: f.back || ''
     };
   }
   const q = (AppState.course.exam_questions || []).find((x) => x.id === itemId);
@@ -199,7 +207,10 @@ function getItemById(itemId) {
       itemId: q.id,
       originalText: q.question_stem,
       sourcePage: q.source_page,
-      label: q.question_stem.slice(0, 45) + '...'
+      label: q.question_stem.slice(0, 45) + '...',
+      title: q.question_stem,
+      formula: q.formula || '',
+      tip: q.explanation || ''
     };
   }
   return null;
@@ -738,10 +749,14 @@ window.openContextualDrawer = function (itemId) {
     itemId,
     originalText: 'مبحث انتخابی',
     sourcePage: 1,
-    label: 'نکته جزوه'
+    label: 'نکته جزوه',
+    title: 'مبحث انتخابی',
+    formula: '',
+    tip: ''
   };
 
   AppState.activeContextItem = item;
+  AppState.contextualItem = item;
   document.getElementById('drawerContextTitle').textContent = `صفحه ${item.sourcePage} جزوه • ${item.label}`;
   document.getElementById('drawerChatBox').innerHTML = `
     <div class="chat-bubble ai">
@@ -752,6 +767,8 @@ window.openContextualDrawer = function (itemId) {
   `;
   document.getElementById('aiDrawerBackdrop').classList.add('open');
 };
+
+window.openContextualSheet = window.openContextualDrawer;
 
 window.closeContextualDrawer = function () {
   document.getElementById('aiDrawerBackdrop').classList.remove('open');
@@ -961,13 +978,26 @@ window.sendContextualPrompt = async function (presetKey, customText) {
   chatBox.innerHTML += `<div class="chat-bubble ai" id="${loadingId}">در حال پردازش بر اساس جزوه استاد... ⏳</div>`;
   chatBox.scrollTop = chatBox.scrollHeight;
 
-  const contextDesc = AppState.activeContextItem
-    ? `صفحه ${AppState.activeContextItem.sourcePage}: ${AppState.activeContextItem.originalText}`
-    : (AppState.course?.title || '');
+  const ctx = AppState.contextualItem || AppState.activeContextItem;
+  let contextDesc = '';
+  if (ctx) {
+    const title = ctx.title || ctx.label || ctx.originalText || '';
+    const formulaPart = ctx.formula ? `فرمول: $${ctx.formula.replace(/^\$+|\$+$/g, '')}$` : '';
+    const tipPart = ctx.tip ? `نکته استاد: ${ctx.tip}` : '';
+    const parts = [
+      ctx.sourcePage ? `صفحه ${ctx.sourcePage} جزوه: ${title}` : title,
+      formulaPart,
+      tipPart
+    ].filter(Boolean);
+    contextDesc = parts.join('\n');
+  } else {
+    contextDesc = AppState.course?.title || '';
+  }
 
   try {
     const data = await streamTutorAnswer({
       courseId: AppState.course?.id || 'sample_course',
+      context: contextDesc,
       contextText: contextDesc,
       question: userMsg,
       presetKey

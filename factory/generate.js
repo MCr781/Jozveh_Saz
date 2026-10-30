@@ -87,33 +87,35 @@ export async function callGeminiRest({ contents, generationConfig, model = confi
     }
   }
 
-  let activeModel = model;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const apiKey = getNextApiKey();
-    try {
+  const cascadeModels = Array.from(new Set([model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'].filter(Boolean)));
+
+  for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
+    const activeModel = cascadeModels[mIdx];
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const apiKey = getNextApiKey();
       try {
         return await doRequest(apiKey, activeModel);
-      } catch (reqErr) {
-        const isModelRetired = reqErr.status === 404 || (reqErr.message && (reqErr.message.includes('no longer available') || reqErr.message.includes('not found')));
-        if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
-          console.warn(`⚠️ Model ${activeModel} unavailable (${reqErr.message}). Falling back to gemini-3.8-flash...`);
-          activeModel = 'gemini-3.8-flash';
-          return await doRequest(apiKey, activeModel);
+      } catch (err) {
+        lastError = err;
+        const msg = String(err.message || '').toLowerCase();
+        const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
+        const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+
+        if (isQuotaExceeded || isModelRetired) {
+          if (mIdx < cascadeModels.length - 1) {
+            console.warn(`⚠️ Model ${activeModel} exhausted or unavailable (${err.message}). Cascading to ${cascadeModels[mIdx + 1]}...`);
+            break;
+          }
+          throw err;
         }
-        throw reqErr;
-      }
-    } catch (err) {
-      lastError = err;
-      const isHighDemand = err.status === 503 || err.status === 429 || (err.message && (
-        err.message.includes('high demand') ||
-        err.message.includes('overloaded') ||
-        err.message.includes('UNAVAILABLE')
-      ));
-      console.warn(`[Gemini REST Attempt ${attempt + 1}] Warning: ${err.message}`);
-      if (attempt < maxRetries - 1) {
-        const delay = isHighDemand ? retryDelayMs : 1000;
-        if (delay > 0) {
-          await new Promise((r) => setTimeout(r, delay));
+
+        const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
+        console.warn(`[Gemini REST Attempt ${attempt + 1}] Warning: ${err.message}`);
+        if (attempt < maxRetries - 1) {
+          const delay = isHighDemand ? retryDelayMs : 1000;
+          if (delay > 0) {
+            await new Promise((r) => setTimeout(r, delay));
+          }
         }
       }
     }

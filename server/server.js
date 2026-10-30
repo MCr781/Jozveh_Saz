@@ -111,6 +111,28 @@ export async function probeGeminiModel() {
   }
 }
 
+const exhaustedModelsMap = new Map(); // modelName -> timestampMs (until)
+
+export function isModelExhausted(modelName) {
+  if (!modelName) return false;
+  const until = exhaustedModelsMap.get(modelName);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    exhaustedModelsMap.delete(modelName);
+    return false;
+  }
+  return true;
+}
+
+export function markModelExhausted(modelName, ttlMs = 30 * 60 * 1000) {
+  if (!modelName) return;
+  exhaustedModelsMap.set(modelName, Date.now() + ttlMs);
+}
+
+export function resetFallbackStateForTests() {
+  exhaustedModelsMap.clear();
+}
+
 export async function callGeminiGenerateContent({
   apiKey = getNextGeminiKey(),
   model = config.geminiModel || 'gemini-3.8-flash',
@@ -173,7 +195,13 @@ export async function callGeminiGenerateContent({
     }
   }
 
-  const cascadeModels = Array.from(new Set([model, 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'].filter(Boolean)));
+  const baseCascade = [model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'];
+  const uniqueModels = Array.from(new Set(baseCascade.filter(Boolean)));
+  let cascadeModels = uniqueModels.filter(m => !isModelExhausted(m));
+  if (cascadeModels.length === 0) {
+    cascadeModels = uniqueModels;
+  }
+
   let currentKey = apiKey;
   let lastErr = null;
 
@@ -189,6 +217,7 @@ export async function callGeminiGenerateContent({
         const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
 
         if (isQuotaExceeded || isModelRetired) {
+          markModelExhausted(activeModel);
           if (mIdx < cascadeModels.length - 1) {
             console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
             break;
@@ -279,7 +308,13 @@ export async function callGeminiStreamGenerateContent({
     }
   }
 
-  const cascadeModels = Array.from(new Set([model, 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'].filter(Boolean)));
+  const baseCascade = [model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'];
+  const uniqueModels = Array.from(new Set(baseCascade.filter(Boolean)));
+  let cascadeModels = uniqueModels.filter(m => !isModelExhausted(m));
+  if (cascadeModels.length === 0) {
+    cascadeModels = uniqueModels;
+  }
+
   let currentKey = apiKey;
   let lastErr = null;
 
@@ -295,6 +330,7 @@ export async function callGeminiStreamGenerateContent({
         const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
 
         if (isQuotaExceeded || isModelRetired) {
+          markModelExhausted(activeModel);
           if (mIdx < cascadeModels.length - 1) {
             console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
             break;
@@ -349,87 +385,94 @@ export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' 
   const cleanContext = String(contextText || '').trim();
   const cleanQ = String(question || '').trim();
 
-  // استخراج فرمول‌های ریاضی KaTeX ($...$ یا $$...$$)
-  const rawFormulas = [];
+  // خطوط متن را برای تفکیک تمیز عنوان، فرمول‌ها و نکات جدا می‌کنیم
+  const lines = cleanContext.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  let title = '';
+  const formulas = [];
+  let tip = '';
+
+  for (const line of lines) {
+    const cleanLine = line.replace(/^صفحه\s*[\d\u06F0-\u06F9\u0660-\u0669]+\s*:\s*/i, '').trim();
+    if (/^(فرمول|رابطه|معادله)(\s*کلیدی|\s*استاد)?\s*[:：]/i.test(cleanLine)) {
+      const f = cleanLine.replace(/^(فرمول|رابطه|معادله)(\s*کلیدی|\s*استاد)?\s*[:：]\s*/i, '').trim();
+      if (f && !formulas.includes(f)) formulas.push(f);
+    } else if (/^(نکته|دام|تذکر|نکته استاد)(\s*استاد|\s*تستی|\s*کلیدی|\s*امتحانی)?\s*[:：]/i.test(cleanLine)) {
+      tip = cleanLine.replace(/^(نکته|دام|تذکر|نکته استاد)(\s*استاد|\s*تستی|\s*کلیدی|\s*امتحانی)?\s*[:：]\s*/i, '').trim();
+    } else if (!title) {
+      title = cleanLine;
+    }
+  }
+
+  // استخراج فرمول‌های KaTeX ($...$ یا $$...$$) در صورت عدم وجود برچسب
   const formulaRegex = /\$\$([\s\S]+?)\$\$|\$([^\$]+?)\$/g;
   let match;
   while ((match = formulaRegex.exec(cleanContext)) !== null) {
     const f = match[0].trim();
-    if (!rawFormulas.includes(f)) rawFormulas.push(f);
+    if (!formulas.includes(f)) formulas.push(f);
   }
 
-  // اگر فرمول با دلار یافت نشد، بررسی معادلات بدون علامت دلار
-  if (rawFormulas.length === 0) {
-    const eqMatches = cleanContext.match(/([a-zA-Z\\][a-zA-Z0-9_^\s\\+\-*=/]+=[a-zA-Z0-9_^\s\\+\-*=/]+)/g);
-    if (eqMatches) {
-      for (const eq of eqMatches) {
-        const trimmed = eq.trim();
-        if (trimmed.length >= 3 && !rawFormulas.includes(trimmed)) {
-          rawFormulas.push(trimmed);
-        }
-      }
-    }
-  }
-
-  // اطمینان ۱۰۰٪ از احاطه شدن هر فرمول در $...$
-  const formulas = rawFormulas.map(f => {
+  // اطمینان ۱۰۰٪ از احاطه شدن فرمول‌ها در $...$
+  const formattedFormulas = formulas.map(f => {
     const t = f.trim();
     if (t.startsWith('$')) return t;
     return `$${t}$`;
   });
 
-  // استخراج عنوان و سرنخ‌های کلیدی از متن کارت
-  const firstLine = cleanContext
-    .replace(/^صفحه\s*[\d\u06F0-\u06F9\u0660-\u0669]+\s*:\s*/i, '')
-    .split(/\r?\n/)[0] || '';
+  // اگر عنوان پیدا نشد، از خط اول استفاده شود (بدون برش عنوان در پرانتز)
+  if (!title && lines.length > 0) {
+    title = lines[0].replace(/^صفحه\s*[\d\u06F0-\u06F9\u0660-\u0669]+\s*:\s*/i, '').trim();
+  }
 
-  let topic = firstLine.split(/[:：$]/)[0].trim();
-  if (!topic || topic.length < 3) topic = firstLine.split('$')[0].trim() || 'این مبحث امتحانی';
-  if (topic.length > 60) topic = topic.slice(0, 60).trim();
-
-  // تشخیص هدف پرسش دانشجو (ساده، مثال عددی، یا دام تستی)
-  const qLower = cleanQ.toLowerCase();
-  const isExample = qLower.includes('مثال') || qLower.includes('عددی') || qLower.includes('محاسبه') || qLower.includes('حل');
-  const isTrap = qLower.includes('دام') || qLower.includes('تست') || qLower.includes('انحراف') || qLower.includes('اشتباه') || qLower.includes('خطا');
-
-  let part1 = '';
-  let part2 = '';
-  let part3 = '';
-
-  if (isExample) {
-    part1 = `برای حل مسائل مربوط به **${topic}**، ابتدا باید داده‌های معلوم مسئله را تفکیک کرده و مجهول خواسته شده را در فرمول اصلی مشخص کنیم.`;
-    if (formulas.length > 0) {
-      part2 = `رابطه محاسباتی استاد: ${formulas.join(' و ')}\n\n` +
-        `روش حل گام‌به‌گام: با جایگذاری مقادیر استاندارد در رابطه بالا، مجهول مورد نظر به دست می‌آید.`;
-    } else {
-      part2 = `روش محاسباتی: مقادیر داده‌شده را در شرایط تعادل سیستم قرار داده و متغیر هدف را استخراج کنید.`;
+  if (title) {
+    const colonIdx = title.indexOf(':');
+    if (colonIdx > 0 && colonIdx < 20 && !title.includes('(')) {
+      const rest = title.slice(colonIdx + 1).trim();
+      if (rest) title = rest;
     }
-    part3 = `نکته امتحانی مهم: در مسائل عددی، حتماً یکسان بودن واحدها در سیستم SI (مخصوصاً فشار برحسب پاسکال و حجم برحسب مترمکعب) را کنترل کنید تا از نمره شما کسر نشود.`;
-  } else if (isTrap) {
-    part1 = `در مبحث **${topic}**، معمولاً طراحان از تغییر شرایط مرزی یا تعریف غیرمستقیم متغیرها برای تست دقت دانشجو استفاده می‌کنند.`;
-    if (formulas.length > 0) {
-      part2 = `روابط دارای پیش‌شرط: ${formulas.join(' و ')}\n\n` +
-        `این فرمول تنها در فرآیندهای معین با شرایط مشخص صدق می‌کند و نباید در حالت عمومی تعمیم داده شود.`;
-    } else {
-      part2 = `روابط کلیدی تنها در فرض‌های اولیه مشخص‌شده در جزوه استاد دارای اعتبار هستند.`;
-    }
-    part3 = `بزرگ‌ترین دام تستی: عدم توجه به علائم جبری (مثبت و منفی) متغیرها و فرضیات اولیه مسئله است که نمره تشریحی را صفر می‌کند.`;
   } else {
-    part1 = `مفهوم بنیادین **${topic}** به بیان ساده این است که تغییرات در متغیرهای سیستم، مستقیماً طبق قوانین این بخش، نتیجه نهایی را تعیین می‌کند.`;
-    if (formulas.length > 0) {
-      part2 = `فرمول کلیدی استاد: ${formulas.join(' و ')}\n\n` +
-        `این رابطه نحوه تغییرات متغیر اصلی را نسبت به سایر پارامترها در آزمون توصیف می‌کند.`;
-    } else {
-      part2 = `نکته کلیدی جزوه: بررسی ارتباط علت و معلولی میان متغیرهای معرفی‌شده، کلید پاسخ به سوالات این مبحث است.`;
+    title = 'این مبحث امتحانی';
+  }
+
+  // اگر نکته استاد مشخص نشده بود، از سایر خطوط متن استفاده شود
+  if (!tip) {
+    for (const line of lines) {
+      const cleanLine = line.replace(/^صفحه\s*[\d\u06F0-\u06F9\u0660-\u0669]+\s*:\s*/i, '').trim();
+      if (cleanLine !== title && !formattedFormulas.some(f => cleanLine.includes(f))) {
+        tip = cleanLine;
+        break;
+      }
     }
-    part3 = `دام تستی و نکته کلیدی استاد: همیشه قبل از نگارش فرمول، تعاریف متغیرها و فرضیات سیستم را یادداشت کنید تا در تله‌های تستی نیفتید.`;
+  }
+
+  // بخش ۱: توضیح ساده و خودمانی نکته
+  let part1 = `موضوع مورد بررسی: **${title}**`;
+  if (cleanQ) {
+    part1 += `\nدر پاسخ به پرسش «${cleanQ}»، مفاهیم کلیدی این بخش در ادامه تشریح شده است.`;
+  }
+
+  // بخش ۲: رابطه و کاربرد امتحانی (فرمول‌ها به صورت جداگانه و خط به خط بدون چسبیدن به هم)
+  let part2 = '';
+  if (formattedFormulas.length > 0) {
+    part2 = formattedFormulas.join('\n\n');
+  } else {
+    part2 = 'در این مبحث رابطه فرمولی مستقیمی ثبت نشده و تمرکز بر درک مفهومی ساختار است.';
+  }
+
+  // بخش ۳: دام تستی و نکته کلیدی استاد (حذف هرگونه تکرار پیشوند)
+  let part3 = '';
+  if (tip) {
+    part3 = tip.replace(/^(دام تستی و نکته کلیدی استاد|نکته استاد و دام آزمون|نکته استاد|دام تستی|نکته کلیدی|تذکر)\s*[:：]\s*/i, '').trim();
+  } else {
+    part3 = 'همیشه قبل از نگارش فرمول، تعاریف متغیرها و شرایط مرزی سیستم را کنترل کنید تا در تله‌های تستی نیفتید.';
   }
 
   const sections = [
     `💡 **تحلیل مستند به جزوه استاد:**`,
     `**۱. توضیح ساده و خودمانی نکته:**\n\n${part1}`,
     `**۲. رابطه و کاربرد امتحانی:**\n\n${part2}`,
-    `**۳. دام تستی و نکته کلیدی استاد:**\n\n${part3}`
+    `**۳. دام تستی و نکته کلیدی استاد:**\n\n${part3}`,
+    `ℹ️ (سهمیه روزانه کلید رایگان گوگل تکمیل شده است؛ برای دریافت پاسخ‌های تحلیلی بیشتر، کلید دوم GEMINI_API_KEY_2 را در تنظیمات سرور اضافه کنید.)`
   ];
 
   return sections.join('\n\n');
@@ -1314,7 +1357,7 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const bodyObj = JSON.parse(bodyRaw || '{}');
-        const { courseId = 'sample_course', contextText, question, presetKey, imageBase64, stream } = bodyObj;
+        const { courseId = 'sample_course', context, contextText, question, presetKey, imageBase64, stream } = bodyObj;
         const isStream = Boolean(stream) || String(req.headers['accept'] || '').includes('text/event-stream');
         const userId = String(auth.user.id);
         const st = getUserStats(userId);
@@ -1341,8 +1384,9 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const cleanQuestion = String(question || '').trim().slice(0, 350);
+        const rawContext = context || contextText || '';
         // Truncate card context strictly to max 300 words
-        const cardWords = String(contextText || '').trim().split(/\s+/).slice(0, 300);
+        const cardWords = String(rawContext).trim().split(/\s+/).slice(0, 300);
         const cleanContext = cardWords.join(' ');
 
         if (!cleanQuestion && !imageBase64) {

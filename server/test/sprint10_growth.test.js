@@ -30,7 +30,9 @@ const {
   recordCourseSale,
   callGeminiGenerateContent,
   synthesizeGroundedTutorAnswer,
-  chunkTextForSse
+  chunkTextForSse,
+  resetFallbackStateForTests,
+  isModelExhausted
 } = await import('../server.js');
 
 const { config } = await import('../config.js');
@@ -346,6 +348,24 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.ok(res.includes('**۳. دام تستی و نکته کلیدی استاد:**'));
     assert.ok(res.includes('$W = \\int P dV$'));
     assert.ok(res.includes('$Q = m c \\Delta T$'));
+    assert.ok(res.includes('سهمیه روزانه کلید رایگان گوگل تکمیل شده است'));
+  });
+
+  it('synthesizeGroundedTutorAnswer preserves parenthesized titles and formats structured card context without robotic filler', () => {
+    const res = synthesizeGroundedTutorAnswer({
+      question: 'نقطه یوتکتوئید چیست؟',
+      contextText: [
+        'در دیاگرام فازی آهن-سمانتیت (Fe3C)، نقطه یوتکتوئید در غلظت 0.77 درصد وزنی کربن رخ می‌دهد.',
+        'فرمول: $\\gamma \\rightarrow \\alpha + Fe_3C$',
+        'نکته استاد: فاز فریت و سمانتیت به صورت لایه‌ای تشکیل می‌شوند.'
+      ].join('\n')
+    });
+
+    assert.ok(res.includes('در دیاگرام فازی آهن-سمانتیت (Fe3C)'), 'Must not truncate titles at (');
+    assert.ok(res.includes('$\\gamma \\rightarrow \\alpha + Fe_3C$'), 'Formula must be preserved intact');
+    assert.ok(res.includes('فاز فریت و سمانتیت به صورت لایه‌ای تشکیل می‌شوند.'), 'Tip must be cleanly rendered');
+    assert.ok(!res.includes('تغییرات در متغیرهای سیستم، مستقیماً طبق قوانین'), 'Robotic filler must be completely purged');
+    assert.ok(!res.includes('دام تستی و نکته کلیدی استاد: دام تستی'), 'Duplicate prefixes must be purged');
   });
 
   it('chunkTextForSse reconstructs the exact original string with spaces, newlines, and formulas 100% intact', () => {
@@ -366,7 +386,8 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.ok(chunks.some((c) => c.includes('$$W = \\int_{V_1}^{V_2} P \\, dV$$')), 'Block math must be contained whole inside a single chunk');
   });
 
-  it('callGeminiGenerateContent cascades to next model immediately when a model returns 429 Quota exceeded', async () => {
+  it('callGeminiGenerateContent cascades to gemini-3.5-flash-lite on 429 and caches cooldown', async () => {
+    resetFallbackStateForTests();
     const originalFetch = global.fetch;
     const requestedModels = [];
 
@@ -409,10 +430,25 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
       });
 
       assert.ok(requestedModels.includes('gemini-3.8-flash'));
-      assert.ok(requestedModels.includes('gemini-2.5-flash-lite'));
-      assert.strictEqual(res, 'پاسخ از مدل آبشاری gemini-2.5-flash-lite');
+      assert.ok(requestedModels.includes('gemini-3.5-flash-lite'));
+      assert.strictEqual(res, 'پاسخ از مدل آبشاری gemini-3.5-flash-lite');
+      assert.ok(isModelExhausted('gemini-3.8-flash'), 'gemini-3.8-flash must be marked exhausted for cooldown');
+
+      // Subsequent call skips exhausted model directly without network attempt
+      requestedModels.length = 0;
+      const res2 = await callGeminiGenerateContent({
+        apiKey: 'test-api-key',
+        model: 'gemini-3.8-flash',
+        payload: { contents: [{ parts: [{ text: 'تست کش' }] }] },
+        timeoutMs: 2000
+      });
+
+      assert.ok(!requestedModels.includes('gemini-3.8-flash'), 'Should skip gemini-3.8-flash while in cooldown');
+      assert.ok(requestedModels.includes('gemini-3.5-flash-lite'));
+      assert.strictEqual(res2, 'پاسخ از مدل آبشاری gemini-3.5-flash-lite');
     } finally {
       global.fetch = originalFetch;
+      resetFallbackStateForTests();
     }
   });
 });
