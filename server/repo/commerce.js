@@ -83,7 +83,56 @@ export function hasPendingPayout(db, creatorId) {
   return Boolean(row);
 }
 
-export function requestPayout(db, { creatorId, sheba, amountToman, payoutId, now = Date.now() }) {
+export function getCreatorSheba(db, creatorId) {
+  const row = db.prepare('SELECT sheba, bank_name, updated_at FROM creator_profiles WHERE creator_id = ?').get(String(creatorId));
+  if (row) {
+    return {
+      sheba: row.sheba,
+      bankName: row.bank_name,
+      updatedAt: Number(row.updated_at)
+    };
+  }
+  return null;
+}
+
+export function recordCreatorSheba(db, { creatorId, sheba, bankName = '', now = Date.now() }) {
+  const cid = String(creatorId);
+  const cleanSheba = String(sheba || '').replace(/[\s-]/g, '').toUpperCase();
+  const prior = getCreatorSheba(db, cid);
+
+  const isChanged = Boolean(prior && prior.sheba && prior.sheba.toUpperCase() !== cleanSheba);
+  const previousSheba = prior ? prior.sheba : null;
+  const previousBank = prior ? prior.bankName : null;
+
+  tx(db, () => {
+    db.prepare(`
+      INSERT INTO creator_profiles(creator_id, sheba, bank_name, updated_at)
+      VALUES(?, ?, ?, ?)
+      ON CONFLICT(creator_id) DO UPDATE SET
+        sheba = excluded.sheba,
+        bank_name = excluded.bank_name,
+        updated_at = excluded.updated_at
+    `).run(cid, cleanSheba, bankName, now);
+
+    const numId = Number(cid);
+    if (Number.isSafeInteger(numId) && numId > 0) {
+      try {
+        db.prepare('UPDATE users SET sheba = ?, sheba_updated_at = ? WHERE telegram_id = ?').run(cleanSheba, now, numId);
+      } catch (_) {}
+    }
+  });
+
+  return {
+    isChanged,
+    previousSheba,
+    previousBank,
+    bankName,
+    currentSheba: cleanSheba,
+    updatedAt: now
+  };
+}
+
+export function requestPayout(db, { creatorId, sheba, amountToman, payoutId, now = Date.now(), minPayoutToman = 0 }) {
   return tx(db, () => {
     if (hasPendingPayout(db, creatorId)) {
       return { ok: false, reason: 'pending_exists' };
@@ -92,6 +141,10 @@ export function requestPayout(db, { creatorId, sheba, amountToman, payoutId, now
     const bal = balanceOf(db, creatorId);
     if (!Number.isInteger(amountToman) || amountToman <= 0 || amountToman > bal) {
       return { ok: false, reason: 'insufficient', balance: bal };
+    }
+
+    if (minPayoutToman > 0 && amountToman < minPayoutToman) {
+      return { ok: false, reason: 'below_minimum', minPayoutToman, balance: bal };
     }
 
     db.prepare(`
@@ -187,4 +240,88 @@ export function resolveReceipt(db, { receiptId, approve, creatorId = 'creator_de
       saleResult
     };
   });
+}
+
+export function reconcileStalePaymentIntents(db, { now = Date.now(), maxAgeMs = 15 * 60 * 1000 } = {}) {
+  const threshold = now - maxAgeMs;
+  return tx(db, () => {
+    const stale = db.prepare(`
+      SELECT authority, user_id, course_id, amount_toman, created_at
+      FROM payment_intents
+      WHERE state IN ('created', 'redirected') AND created_at <= ?
+    `).all(threshold);
+
+    const expiredAuthorities = [];
+    for (const intent of stale) {
+      db.prepare(`
+        UPDATE payment_intents
+        SET state = 'expired', updated_at = ?
+        WHERE authority = ?
+      `).run(now, intent.authority);
+      expiredAuthorities.push(intent.authority);
+    }
+
+    return {
+      reconciledCount: expiredAuthorities.length,
+      expiredAuthorities
+    };
+  });
+}
+
+export function verifyLedgerInvariant(db) {
+  const salesRow = db.prepare(`
+    SELECT
+      COALESCE(SUM(price_toman), 0) AS total_sales_price,
+      COALESCE(SUM(creator_share_toman), 0) AS total_creator_share,
+      COALESCE(SUM(platform_share_toman), 0) AS total_platform_share
+    FROM sales
+  `).get();
+
+  const ledgerRow = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN kind = 'sale_credit' THEN amount_toman ELSE 0 END), 0) AS total_sale_credits,
+      COALESCE(SUM(CASE WHEN kind = 'payout_hold' THEN amount_toman ELSE 0 END), 0) AS total_payout_holds,
+      COALESCE(SUM(CASE WHEN kind = 'payout_release' THEN amount_toman ELSE 0 END), 0) AS total_payout_releases,
+      COALESCE(SUM(amount_toman), 0) AS net_ledger_balance
+    FROM creator_ledger
+  `).get();
+
+  const payoutsRow = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN status = 'pending' THEN amount_toman ELSE 0 END), 0) AS pending_payouts,
+      COALESCE(SUM(CASE WHEN status = 'approved' THEN amount_toman ELSE 0 END), 0) AS approved_payouts,
+      COALESCE(SUM(CASE WHEN status = 'rejected' THEN amount_toman ELSE 0 END), 0) AS rejected_payouts
+    FROM payouts
+  `).get();
+
+  const totalCreatorShare = Number(salesRow.total_creator_share);
+  const totalSaleCredits = Number(ledgerRow.total_sale_credits);
+  const netLedgerBalance = Number(ledgerRow.net_ledger_balance);
+  const pendingPayouts = Number(payoutsRow.pending_payouts);
+  const approvedPayouts = Number(payoutsRow.approved_payouts);
+
+  // Invariant 1: Total creator share from sales must match sale_credit entries in ledger
+  const creditDiff = Math.abs(totalCreatorShare - totalSaleCredits);
+
+  // Invariant 2: Net ledger balance + held pending payouts + approved payouts must equal total sale credits
+  const ledgerReconciled = netLedgerBalance + pendingPayouts + approvedPayouts;
+  const balanceDiff = Math.abs(ledgerReconciled - totalSaleCredits);
+
+  const totalDiff = creditDiff + balanceDiff;
+
+  return {
+    ok: totalDiff === 0,
+    diff: totalDiff,
+    creditDiff,
+    balanceDiff,
+    details: {
+      totalSalesPrice: Number(salesRow.total_sales_price),
+      totalCreatorShare,
+      totalPlatformShare: Number(salesRow.total_platform_share),
+      totalSaleCredits,
+      netLedgerBalance,
+      pendingPayouts,
+      approvedPayouts
+    }
+  };
 }

@@ -8,8 +8,11 @@ import { tgApi, notifyTelegram } from './telegram.js';
 import * as commerceRepo from './repo/commerce.js';
 import * as reportsRepo from './repo/reports.js';
 import * as aiRepo from './repo/ai.js';
-import { isValidSheba } from './sheba.js';
+import * as inboxRepo from './repo/inbox.js';
+import { isValidSheba, getShebaBankName } from './sheba.js';
+import { config } from './config.js';
 import { generateCoursePackage } from '../factory/generate.js';
+import { triggerTelegramBackupIfConfigured } from '../scripts/backup.js';
 
 export { tgApi, notifyTelegram } from './telegram.js';
 
@@ -238,7 +241,39 @@ export function startReviewReminderScheduler() {
 }
 
 
-async function handleUpdate(update) {
+export async function handleUpdate(update) {
+  if (!update || typeof update !== 'object') return { ok: false, reason: 'empty_update' };
+
+  const updateId = update.update_id;
+  if (updateId !== undefined && updateId !== null) {
+    const claim = inboxRepo.claimUpdate(db, updateId);
+    if (claim.duplicate) {
+      return { ok: true, duplicate: true, updateId };
+    }
+  }
+
+  if (update.callback_query?.id) {
+    const cbClaim = inboxRepo.claimCallback(db, update.callback_query.id);
+    if (cbClaim.duplicate) {
+      return { ok: true, duplicate: true, callbackId: update.callback_query.id };
+    }
+  }
+
+  try {
+    const res = await processUpdate(update);
+    if (updateId !== undefined && updateId !== null) {
+      inboxRepo.markUpdateProcessed(db, updateId);
+    }
+    return { ok: true, updateId, result: res };
+  } catch (err) {
+    if (updateId !== undefined && updateId !== null) {
+      inboxRepo.markUpdateFailed(db, updateId);
+    }
+    throw err;
+  }
+}
+
+async function processUpdate(update) {
   const webappUrl = process.env.WEBAPP_URL?.trim()?.replace(/\/+$/, '') || getWebappUrl();
   const adminChatId = process.env.ADMIN_CHAT_ID?.trim() || getAdminChatId();
 
@@ -512,11 +547,19 @@ async function handleUpdate(update) {
       DB.creatorSheba = DB.creatorSheba || {};
       DB.creatorSheba[chatId] = sheba;
 
-      if (balance <= 0) {
-        await notifyTelegram(chatId, `🏦 شماره شبا <code>${sheba}</code> ثبت شد.\nموجودی قابل تسویه شما در حال حاضر ۰ تومان است.`);
+      const minPayoutToman = config.minPayoutToman || 50000;
+      if (balance < minPayoutToman) {
+        await notifyTelegram(
+          chatId,
+          `⚠️ <b>موجودی ناکافی برای تسویه:</b>\n` +
+          `موجودی قابل تسویه شما <b>${balance.toLocaleString('fa-IR')} تومان</b> است، در حالی که حداقل سقف مجاز تسویه <b>${minPayoutToman.toLocaleString('fa-IR')} تومان</b> می‌باشد.`
+        );
         saveDB();
         return;
       }
+
+      const bankName = getShebaBankName(sheba);
+      const shebaRecord = commerceRepo.recordCreatorSheba(db, { creatorId: chatId, sheba, bankName });
 
       // مسدودسازی آنی موجودی جهت جلوگیری از سوءاستفاده درخواست‌های همزمان
       stats.balanceToman = 0;
@@ -534,17 +577,32 @@ async function handleUpdate(update) {
       };
       saveDB();
       try {
-        commerceRepo.requestPayout(db, { creatorId: chatId, sheba, amountToman: balance, payoutId });
+        commerceRepo.requestPayout(db, { creatorId: chatId, sheba, amountToman: balance, payoutId, minPayoutToman });
       } catch (_) {}
 
-      if (adminChatId) {
-        await notifyTelegram(adminChatId, `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 <code>${chatId}</code>\n🏦 <code>${sheba}</code>\n💰 ${balance.toLocaleString('fa-IR')} تومان`, [[
-          { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
-          { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
-        ]]);
+      let warningLine = '';
+      if (shebaRecord.isChanged) {
+        warningLine = `\n\n⚠️ <b>هشدار امنیتی: تغییر شماره شبا (نیازمند بررسی هویت)</b>\nشبای قبلی: <code>${escapeHtml(shebaRecord.previousSheba)}</code> (${escapeHtml(shebaRecord.previousBank || '')})`;
+        notifyTelegram(chatId, '⚠️ <b>هشدار امنیتی:</b> شماره شبای حساب شما تغییر کرد. اگر این درخواست توسط شما ثبت نشده است، فوراً به پشتیبانی اطلاع دهید.').catch(() => {});
       }
 
-      await notifyTelegram(chatId, `✅ شماره شبا <code>${sheba}</code> ثبت شد و درخواست تسویه ${balance.toLocaleString('fa-IR')} تومان برای ادمین ارسال گردید.`);
+      if (adminChatId) {
+        await notifyTelegram(
+          adminChatId,
+          `💸 <b>درخواست تسویه جزوه‌نویس</b>\n` +
+          `👤 <code>${chatId}</code>\n` +
+          `🏦 بانک: <b>${escapeHtml(bankName)}</b>\n` +
+          `💳 شبا: <code>${sheba}</code>\n` +
+          `💰 ${balance.toLocaleString('fa-IR')} تومان` +
+          warningLine,
+          [[
+            { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
+            { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
+          ]]
+        );
+      }
+
+      await notifyTelegram(chatId, `✅ شماره شبا <code>${sheba}</code> (${bankName}) ثبت شد و درخواست تسویه ${balance.toLocaleString('fa-IR')} تومان برای ادمین ارسال گردید.`);
       return;
     }
 
@@ -667,6 +725,13 @@ export async function startTelegramBotPolling() {
   }
   if (isPolling) return;
 
+  const mode = config.botMode || (process.env.BOT_MODE || 'poll').trim().toLowerCase();
+  if (mode === 'webhook') {
+    console.log('🤖 Telegram Bot running in Webhook mode. Long-polling skipped.');
+    startReviewReminderScheduler();
+    return;
+  }
+
   const me = await tgApi('getMe', {});
   if (me && me.ok && me.result?.username) {
     console.log(`✅ Connected to Telegram Bot: @${me.result.username}`);
@@ -676,7 +741,8 @@ export async function startTelegramBotPolling() {
   }
 
   isPolling = true;
-  console.log('🤖 ربات تلگرام جزوه زنده (Long-Polling) فعال شد!');
+  lastUpdateId = inboxRepo.getLastUpdateId(db) || 0;
+  console.log(`🤖 ربات تلگرام جزوه زنده (Long-Polling) فعال شد! (offset=${lastUpdateId})`);
   startReviewReminderScheduler();
 
   while (isPolling) {
@@ -685,6 +751,7 @@ export async function startTelegramBotPolling() {
       if (data && data.ok && Array.isArray(data.result)) {
         for (const upd of data.result) {
           lastUpdateId = upd.update_id;
+          inboxRepo.setLastUpdateId(db, lastUpdateId);
           await handleUpdate(upd);
         }
       } else if (!data || !data.ok) {
@@ -695,4 +762,8 @@ export async function startTelegramBotPolling() {
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
+}
+
+export function stopTelegramBotPolling() {
+  isPolling = false;
 }

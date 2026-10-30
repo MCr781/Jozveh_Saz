@@ -8,4 +8,6 @@ server/state_db.json
 *.db-shm
 migration_report.json
 server/uploads/
+backups/
+*.enc
 .DS_Store

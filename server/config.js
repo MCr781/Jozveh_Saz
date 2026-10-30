@@ -1,5 +1,6 @@
 import './env.js';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 /**
  * Validates configuration according to the Sprint 7 contract.
@@ -85,11 +86,24 @@ export function loadConfig(env = process.env) {
   const merchantId = (env.MERCHANT_ID || '').trim();
   const onlineGatewayEnabled = Boolean(merchantId && merchantId.toLowerCase() !== 'demo' && !merchantId.startsWith('YOUR_'));
 
+  const rawMinPayout = Number((env.MIN_PAYOUT_TOMAN || '').trim());
+  const minPayoutToman = Number.isInteger(rawMinPayout) && rawMinPayout > 0 ? rawMinPayout : 50000;
+
+  const botToken = (env.BOT_TOKEN || '').trim();
+  const deterministicBackupKey = crypto
+    .createHmac('sha256', botToken || 'JozvehDefaultSecret')
+    .update('JozvehBackupKey')
+    .digest('hex');
+  const backupKey = (env.BACKUP_KEY || '').trim() || deterministicBackupKey;
+
+  const webhookSecret = (env.WEBHOOK_SECRET || '').trim();
+  const botMode = (env.BOT_MODE || 'poll').trim().toLowerCase();
+
   return Object.freeze({
     isProd,
     nodeEnv: env.NODE_ENV || 'development',
     port,
-    botToken: (env.BOT_TOKEN || '').trim(),
+    botToken,
     adminChatId: String((env.ADMIN_CHAT_ID || '').trim()),
     webappUrl: (env.WEBAPP_URL || '').trim().replace(/\/+$/, ''),
     stateDbPath,
@@ -102,7 +116,10 @@ export function loadConfig(env = process.env) {
     paymentCallbackBase: (env.PAYMENT_CALLBACK_BASE || '').trim().replace(/\/+$/, ''),
     zarinpalBase: (env.ZARINPAL_BASE || '').trim().replace(/\/+$/, '') || 'https://api.zarinpal.com',
     allowDemoPayments: (env.ALLOW_DEMO_PAYMENTS || '').trim() === '1' && !isProd,
-    backupKey: (env.BACKUP_KEY || '').trim()
+    backupKey,
+    webhookSecret,
+    botMode,
+    minPayoutToman
   });
 }
 

@@ -4,8 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { isValidSheba } from './sheba.js';
-import { startTelegramBotPolling } from './bot.js';
+import { isValidSheba, getShebaBankName } from './sheba.js';
+import { startTelegramBotPolling, handleUpdate } from './bot.js';
 import { config, validateConfigOrExit } from './config.js';
 import { openDb, migrate, tx } from './db.js';
 import * as commerceRepo from './repo/commerce.js';
@@ -13,8 +13,10 @@ import * as usersRepo from './repo/users.js';
 import * as aiRepo from './repo/ai.js';
 import * as progressRepo from './repo/progress.js';
 import * as reportsRepo from './repo/reports.js';
+import * as inboxRepo from './repo/inbox.js';
 import { tgApi, notifyTelegram } from './telegram.js';
 import { requireUser, optionalUser, verifyInitData as authVerifyInitData, extractInitDataRaw, HttpError } from './auth.js';
+import { triggerTelegramBackupIfConfigured } from '../scripts/backup.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,7 +24,8 @@ const __dirname = path.dirname(__filename);
 export { loadEnvFile, getEnv } from './env.js';
 export { tgApi, notifyTelegram } from './telegram.js';
 export { requireUser, optionalUser, HttpError } from './auth.js';
-export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo };
+export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo, inboxRepo };
+export { triggerTelegramBackupIfConfigured };
 
 export function escapeHtml(text) {
   if (text === null || text === undefined) return '';
@@ -405,6 +408,8 @@ export async function recordCourseSale(buyerUserId, courseSlugOrId, customPaymen
       `✨ برای مشاهده جزئیات درآمد، دستور /income را در ربات بزنید.`
     );
   }
+
+  triggerTelegramBackupIfConfigured({ dbPath: sqlitePath }).catch(() => {});
 
   return {
     ok: true,
@@ -1419,18 +1424,35 @@ export const server = http.createServer(async (req, res) => {
         const balance = Number.isFinite(inMemBal) && inMemBal > stats.balanceToman ? inMemBal : stats.balanceToman;
         const reqAmount = amount !== undefined ? Number(amount) : balance;
 
+        const minPayoutToman = config.minPayoutToman || 50000;
+        if (reqAmount < minPayoutToman) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            ok: false,
+            code: 'BELOW_MINIMUM',
+            message: `مبلغ درخواستی (${reqAmount.toLocaleString('fa-IR')} تومان) کمتر از حداقل سقف مجاز تسویه (${minPayoutToman.toLocaleString('fa-IR')} تومان) است.`
+          }));
+          return;
+        }
+
+        const bankName = getShebaBankName(cleanSheba);
+        const shebaRecord = commerceRepo.recordCreatorSheba(db, { creatorId, sheba: cleanSheba, bankName });
+
         const payoutId = `payout_${crypto.randomUUID()}`;
         const pRes = commerceRepo.requestPayout(db, {
           creatorId,
           sheba: cleanSheba,
           amountToman: reqAmount,
-          payoutId
+          payoutId,
+          minPayoutToman
         });
 
         if (!pRes.ok) {
           const msg = pRes.reason === 'pending_exists'
             ? 'شما در حال حاضر یک درخواست تسویه در صف بررسی دارید.'
-            : `مبلغ تسویه نامعتبر است. موجودی قابل تسویه: ${balance.toLocaleString('fa-IR')} تومان.`;
+            : (pRes.reason === 'below_minimum'
+              ? `حداقل مبلغ قابل تسویه ${minPayoutToman.toLocaleString('fa-IR')} تومان است.`
+              : `مبلغ تسویه نامعتبر است. موجودی قابل تسویه: ${balance.toLocaleString('fa-IR')} تومان.`);
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: msg }));
           return;
@@ -1455,11 +1477,22 @@ export const server = http.createServer(async (req, res) => {
         }
         saveDB();
 
+        let warningLine = '';
+        if (shebaRecord.isChanged) {
+          warningLine = `\n\n⚠️ <b>هشدار امنیتی: تغییر شماره شبا (نیازمند بررسی هویت)</b>\nشبای قبلی: <code>${escapeHtml(shebaRecord.previousSheba)}</code> (${escapeHtml(shebaRecord.previousBank || '')})`;
+          notifyTelegram(creatorId, '⚠️ <b>هشدار امنیتی:</b> شماره شبای حساب شما تغییر کرد. اگر این درخواست توسط شما ثبت نشده است، فوراً به ادمین اطلاع دهید.').catch(() => {});
+        }
+
         const adminChatId = config.adminChatId || process.env.ADMIN_CHAT_ID?.trim();
         if (adminChatId) {
           await notifyTelegram(
             adminChatId,
-            `💸 <b>درخواست تسویه جزوه‌نویس</b>\n👤 <code>${creatorId}</code>\n🏦 <code>${cleanSheba}</code>\n💰 ${reqAmount.toLocaleString('fa-IR')} تومان`,
+            `💸 <b>درخواست تسویه جزوه‌نویس</b>\n` +
+            `👤 شناسه: <code>${escapeHtml(creatorId)}</code>\n` +
+            `🏦 بانک: <b>${escapeHtml(bankName)}</b>\n` +
+            `💳 شبا: <code>${escapeHtml(cleanSheba)}</code>\n` +
+            `💰 مبلغ: <b>${reqAmount.toLocaleString('fa-IR')}</b> تومان` +
+            warningLine,
             [[
               { text: '✅ تایید تسویه', callback_data: `approve_payout_${payoutId}` },
               { text: '🚫 رد', callback_data: `reject_payout_${payoutId}` }
@@ -1467,11 +1500,76 @@ export const server = http.createServer(async (req, res) => {
           );
         }
 
+        triggerTelegramBackupIfConfigured({ dbPath: sqlitePath }).catch(() => {});
+
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, payoutId, message: 'درخواست تسویه ثبت شد و برای ادمین ارسال گردید.' }));
+        res.end(JSON.stringify({ ok: true, payoutId, bankName, message: 'درخواست تسویه ثبت شد و برای ادمین ارسال گردید.' }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: false, message: 'خطای داخلی سرور در ثبت تسویه.' }));
+      }
+    })();
+    return;
+  }
+
+  // ===== Telegram Webhook Endpoint (Idempotent Inbox) =====
+  if (req.method === 'POST' && url.pathname === '/api/telegram-webhook') {
+    (async () => {
+      try {
+        const secretToken = config.webhookSecret || process.env.WEBHOOK_SECRET?.trim();
+        if (secretToken) {
+          const incomingToken = req.headers['x-telegram-bot-api-secret-token'];
+          const a = Buffer.from(String(incomingToken || ''), 'utf8');
+          const b = Buffer.from(secretToken, 'utf8');
+          if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+            res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid webhook secret token.' }));
+            return;
+          }
+        }
+
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 1024 * 1024);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
+        let update;
+        try {
+          update = JSON.parse(bodyRaw || '{}');
+        } catch (_) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'Invalid JSON payload.' }));
+          return;
+        }
+
+        const updateId = update?.update_id;
+        if (updateId !== undefined && updateId !== null) {
+          const claim = inboxRepo.claimUpdate(db, updateId);
+          if (claim.duplicate) {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: true, duplicate: true }));
+            return;
+          }
+        }
+
+        // Return 200 OK immediately
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true }));
+
+        // Process update asynchronously
+        handleUpdate(update).catch((err) => {
+          console.error(`[WEBHOOK ERROR] Failed processing update ${updateId}:`, err.message);
+        });
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'Internal server error processing webhook.' }));
       }
     })();
     return;
@@ -1527,6 +1625,20 @@ if (isDirectRun) {
   probeGeminiModel().catch(() => {});
 
   const botToken = process.env.BOT_TOKEN?.trim() || config.botToken;
+
+  const gracefulShutdown = async (signal) => {
+    console.log(`🛑 ${signal} received, creating snapshot backup before shutdown...`);
+    try {
+      await triggerTelegramBackupIfConfigured({ force: true, dbPath: sqlitePath });
+    } catch (_) {}
+    server.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 4000).unref();
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   server.listen(PORT, () => {
     console.log(`🚀 سرور جزوه زنده، درگاه امن جزوات و سپر ضداسپم روی پورت http://localhost:${PORT} فعال شد!`);

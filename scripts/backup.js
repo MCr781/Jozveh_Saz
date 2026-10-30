@@ -25,7 +25,12 @@ export async function createEncryptedBackup({
   adminChatId = process.env.ADMIN_CHAT_ID
 } = {}) {
   if (!backupKey) {
-    throw new Error('BACKUP_KEY is required for creating an encrypted backup');
+    const fallbackToken = (botToken || process.env.BOT_TOKEN || '').trim();
+    if (fallbackToken) {
+      backupKey = crypto.createHmac('sha256', fallbackToken).update('JozvehBackupKey').digest('hex');
+    } else {
+      throw new Error('BACKUP_KEY is required for creating an encrypted backup');
+    }
   }
 
   const resolvedDbPath = path.resolve(dbPath);
@@ -101,6 +106,40 @@ export async function createEncryptedBackup({
     if (fs.existsSync(tempSnapshot)) {
       try { fs.unlinkSync(tempSnapshot); } catch (_) {}
     }
+  }
+}
+
+let lastAutoBackupTime = 0;
+const AUTO_BACKUP_DEBOUNCE_MS = 60 * 1000;
+
+/**
+ * Triggers non-blocking debounced backup to Telegram admin chat.
+ */
+export async function triggerTelegramBackupIfConfigured({
+  dbPath = process.env.STATE_DB_PATH || path.resolve(process.cwd(), 'server/jozveh.db'),
+  backupKey = process.env.BACKUP_KEY,
+  botToken = process.env.BOT_TOKEN,
+  adminChatId = process.env.ADMIN_CHAT_ID,
+  force = false
+} = {}) {
+  const now = Date.now();
+  if (!force && now - lastAutoBackupTime < AUTO_BACKUP_DEBOUNCE_MS) {
+    return { ok: true, skipped: true, reason: 'debounced' };
+  }
+  lastAutoBackupTime = now;
+
+  try {
+    const res = await createEncryptedBackup({
+      dbPath,
+      backupKey,
+      sendToAdmin: Boolean(botToken && adminChatId),
+      botToken,
+      adminChatId
+    });
+    return res;
+  } catch (err) {
+    console.error('[AUTO BACKUP] Failed to create encrypted backup:', err.message);
+    return { ok: false, error: err.message };
   }
 }
 

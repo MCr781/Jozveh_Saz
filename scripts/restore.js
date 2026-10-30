@@ -25,7 +25,12 @@ export async function restoreEncryptedBackup({
     throw new Error('inputPath is required for restore');
   }
   if (!backupKey) {
-    throw new Error('BACKUP_KEY is required for decrypting the backup');
+    const fallbackToken = (process.env.BOT_TOKEN || '').trim();
+    if (fallbackToken) {
+      backupKey = crypto.createHmac('sha256', fallbackToken).update('JozvehBackupKey').digest('hex');
+    } else {
+      throw new Error('BACKUP_KEY is required for decrypting the backup');
+    }
   }
 
   const resolvedInputPath = path.resolve(inputPath);

@@ -123,4 +123,44 @@ export const SCHEMA_V1 = `
     reason TEXT NOT NULL,
     created_at INTEGER NOT NULL
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS tg_inbox(
+    update_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('received','processed','failed')),
+    received_at INTEGER NOT NULL,
+    processed_at INTEGER
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS tg_callbacks(
+    callback_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS creator_profiles(
+    creator_id TEXT PRIMARY KEY,
+    sheba TEXT NOT NULL,
+    bank_name TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+`;
+
+export const SCHEMA_V2 = `
+  CREATE TABLE IF NOT EXISTS tg_inbox(
+    update_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('received','processed','failed')),
+    received_at INTEGER NOT NULL,
+    processed_at INTEGER
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS tg_callbacks(
+    callback_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS creator_profiles(
+    creator_id TEXT PRIMARY KEY,
+    sheba TEXT NOT NULL,
+    bank_name TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
 `;
