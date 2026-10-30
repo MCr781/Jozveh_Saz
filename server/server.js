@@ -103,48 +103,108 @@ export async function probeGeminiModel() {
   }
 }
 
-export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
-  const apiKey = getNextGeminiKey();
+export async function callGeminiGenerateContent({
+  apiKey = getNextGeminiKey(),
+  model = config.geminiModel || 'gemini-3.8-flash',
+  payload = {},
+  timeoutMs = 45000
+} = {}) {
   if (!apiKey) return null;
 
-  async function execute(targetModel) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey
-      },
-      body: JSON.stringify({ contents, generationConfig }),
-      signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(15000) : undefined
-    });
+  const fastDefaults = {
+    temperature: 0.3,
+    maxOutputTokens: 800,
+    thinkingConfig: { thinkingBudget: 0 }
+  };
+  const effectiveGenConfig = {
+    ...fastDefaults,
+    ...(payload?.generationConfig || {})
+  };
 
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
-      const err = new Error(msg);
-      err.status = res.status;
+  const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 45000;
+
+  async function executeRequest(targetModel, genConfig) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(new Error(`The operation was aborted due to timeout (${effectiveTimeoutMs}ms)`));
+    }, effectiveTimeoutMs);
+
+    const bodyPayload = {
+      ...payload,
+      generationConfig: genConfig
+    };
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify(bodyPayload),
+        signal: controller.signal
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+        const err = new Error(msg);
+        err.status = res.status;
+        err.data = data;
+        throw err;
+      }
+
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        throw new Error('پاسخی از مدل Gemini دریافت نشد.');
+      }
+      return text;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function executeWithRetry(targetModel) {
+    try {
+      return await executeRequest(targetModel, effectiveGenConfig);
+    } catch (err) {
+      const is400WithThinking = (err.status === 400) && effectiveGenConfig?.thinkingConfig && (
+        !err.message ||
+        err.message.toLowerCase().includes('thinking') ||
+        err.message.toLowerCase().includes('unknown') ||
+        err.message.toLowerCase().includes('invalid') ||
+        err.message.toLowerCase().includes('unrecognized')
+      );
+      if (is400WithThinking) {
+        console.warn(`⚠️ Gemini API 400 with thinkingConfig (${err.message}). Retrying once without thinkingConfig...`);
+        const { thinkingConfig, ...configWithoutThinking } = effectiveGenConfig;
+        return await executeRequest(targetModel, configWithoutThinking);
+      }
       throw err;
     }
-
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error('پاسخی از مدل Gemini دریافت نشد.');
-    }
-
-    return text;
   }
 
   try {
-    return await execute(model);
+    return await executeWithRetry(model);
   } catch (err) {
     const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
     if (isModelRetired && model !== 'gemini-3.8-flash') {
       console.warn(`⚠️ Gemini model ${model} retired/unavailable (${err.message}). Retrying once with gemini-3.8-flash...`);
-      return await execute('gemini-3.8-flash');
+      return await executeWithRetry('gemini-3.8-flash');
     }
     throw err;
   }
+}
+
+export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
+  const apiKey = getNextGeminiKey();
+  if (!apiKey) return null;
+  return await callGeminiGenerateContent({
+    apiKey,
+    model,
+    payload: { contents, generationConfig }
+  });
 }
 
 function createCreatorEarningsProxy(initial = {}) {
@@ -1067,11 +1127,15 @@ export const server = http.createServer(async (req, res) => {
         } else {
           try {
             const tutorPrompt = `
-شما دستیار هوشمند حل تمرین و توضیح جزوه دانشگاهی هستید.
-مبحث فعلی جزوه استاد: """${cleanContext}"""
+شما دستیار حل تمرین و رفع اشکال امتحانی جزوه دانشگاهی هستید.
+مبحث جزوه استاد: """${cleanContext}"""
 پرسش دانشجو: """${cleanQuestion}"""
 
-پاسخ را کوتاه، دقیق، گام‌به‌گام و به زبان فارسی روان بنویس. تمام فرمول‌ها را داخل $...$ یا $$...$$ با سینتکس استاندارد KaTeX قرار بده. (از دستورات خارج از درس خودداری کن).
+دستورالعمل حیاتی پاسخ سریع و فشرده (زیر ۱۵۰ کلمه):
+۱. پاسخ را بسیار کوتاه، امتحانی، صریح و بدون حاشیه در حداکثر ۱۵۰ کلمه بنویس.
+۲. روند مستقیم: فرمول اصلی -> جایگذاری اعداد -> پاسخ نهایی با یکای استاندارد.
+۳. تمام فرمول‌ها و متغیرها را داخل $...$ یا $$...$$ با سینتکس استاندارد KaTeX قرار بده.
+۴. از هرگونه مقدمه‌چینی، احوالپرسی یا توضیحات اضافه پرهیز کن.
 `;
             const parts = [{ text: tutorPrompt }];
             if (imageBase64) {

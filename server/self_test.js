@@ -63,5 +63,5 @@ if (p0Result.status !== 0) {
   process.exit(p0Result.status || 1);
 }
 
-console.log('\n✅ [SELF-TEST SUCCESS] All 65 tests and 8/8 P0 security checks passed cleanly!\n');
+console.log('\n✅ [SELF-TEST SUCCESS] All unit/integration tests and 8/8 P0 security checks passed cleanly!\n');
 process.exit(0);

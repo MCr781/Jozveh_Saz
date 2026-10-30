@@ -37,12 +37,19 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-// Unified API client wrapper with 15s timeout, Telegram auth & error surfacing
+// Unified API client wrapper with smart route timeout, Telegram auth & error surfacing
 async function api(path, options = {}) {
   const apiBase = getApiBase();
   const url = path.startsWith('http') ? path : `${apiBase}${path}`;
+  const isAiOrLongRunningRoute = (
+    path.startsWith('/api/ask-tutor') ||
+    path.startsWith('/api/report-error') ||
+    path.startsWith('/api/report-issue') ||
+    path.startsWith('/api/factory')
+  );
+  const timeoutMs = options.timeoutMs || (isAiOrLongRunningRoute ? 50000 : 15000);
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   const headers = Object.assign({
     'Content-Type': 'application/json',
@@ -77,7 +84,8 @@ async function api(path, options = {}) {
   } catch (err) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
-      return { ok: false, status: 408, code: 'TIMEOUT', message: 'مهلت پاسخ‌دهی به پایان رسید (۱۵ ثانیه).' };
+      const sec = Math.round(timeoutMs / 1000);
+      return { ok: false, status: 408, code: 'TIMEOUT', message: `مهلت پاسخ‌دهی به پایان رسید (${sec} ثانیه).` };
     }
     return { ok: false, status: 0, code: 'NETWORK_ERROR', message: err.message || 'خطای ارتباط با سرور' };
   }
@@ -772,25 +780,33 @@ window.sendContextualPrompt = async function (presetKey, customText) {
     });
 
     const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) loadingEl.remove();
 
     if (data.status === 402 || data?.quotaExceeded) {
+      if (loadingEl) loadingEl.remove();
       closeContextualDrawer();
       openPaywallModal();
       return;
     }
 
     if (data.status === 429) {
-      alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
+      if (loadingEl) {
+        loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ ${escapeHtml(data?.message || 'لطفاً چند ثانیه صبر کنید.')}</span>`;
+      } else {
+        alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
+      }
       return;
     }
 
-    if (data.status === 503 || data.code === 'AI_UPSTREAM') {
-      alert('سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً بعداً تلاش فرمایید (سهمیه شما محفوظ است).');
+    const isAiTimeoutOr503 = data.status === 503 || data.code === 'AI_UPSTREAM' || data.status === 408 || data.code === 'TIMEOUT' || (!data.ok && data.status === 0);
+    if (isAiTimeoutOr503) {
+      if (loadingEl) {
+        loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است یا ارتباط زمانبر شد (از سهمیه شما کسر نشد). لطفاً دوباره روی دکمه بپرس بزنید.</span>`;
+      }
       return;
     }
 
     if (data && data.ok) {
+      if (loadingEl) loadingEl.remove();
       window.TMA.triggerHaptic('success');
       chatBox.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
       chatBox.scrollTop = chatBox.scrollHeight;
@@ -803,10 +819,8 @@ window.sendContextualPrompt = async function (presetKey, customText) {
     throw new Error(data?.message || 'Server error');
   } catch (err) {
     const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) loadingEl.remove();
-
-    if (err?.message && err.message !== 'Server error') {
-      alert(err.message);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است یا ارتباط زمانبر شد (از سهمیه شما کسر نشد). لطفاً دوباره روی دکمه بپرس بزنید.</span>`;
     }
   }
 };
@@ -846,24 +860,32 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
     });
 
     const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) loadingEl.remove();
 
     if (data.status === 402 || data?.quotaExceeded) {
+      if (loadingEl) loadingEl.remove();
       openPaywallModal();
       return;
     }
 
     if (data.status === 429) {
-      alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
+      if (loadingEl) {
+        loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ ${escapeHtml(data?.message || 'لطفاً چند ثانیه صبر کنید.')}</span>`;
+      } else {
+        alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
+      }
       return;
     }
 
-    if (data.status === 503 || data.code === 'AI_UPSTREAM') {
-      alert('سرویس هوش مصنوعی موقتاً در دسترس نیست. لطفاً بعداً تلاش فرمایید (سهمیه شما محفوظ است).');
+    const isAiTimeoutOr503 = data.status === 503 || data.code === 'AI_UPSTREAM' || data.status === 408 || data.code === 'TIMEOUT' || (!data.ok && data.status === 0);
+    if (isAiTimeoutOr503) {
+      if (loadingEl) {
+        loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است یا ارتباط زمانبر شد (از سهمیه شما کسر نشد). لطفاً دوباره روی دکمه بپرس بزنید.</span>`;
+      }
       return;
     }
 
     if (data && data.ok) {
+      if (loadingEl) loadingEl.remove();
       window.TMA.triggerHaptic('success');
       box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
       box.scrollTop = box.scrollHeight;
@@ -876,9 +898,8 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
     throw new Error(data?.message || 'Server error');
   } catch (err) {
     const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) loadingEl.remove();
-    if (err?.message && err.message !== 'Server error') {
-      alert(err.message);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است یا ارتباط زمانبر شد (از سهمیه شما کسر نشد). لطفاً دوباره روی دکمه بپرس بزنید.</span>`;
     }
   }
 };
@@ -1188,14 +1209,29 @@ window.sendExamImageToSolver = async function (imageBase64) {
       })
     });
     const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) loadingEl.remove();
-    if (data.status === 402 || data?.quotaExceeded) { openPaywallModal(); return; }
-    if (data.status === 429) { alert(data?.message || 'لطفاً چند ثانیه صبر کنید.'); return; }
-    if (data.status === 503 || data.code === 'AI_UPSTREAM') {
-      alert('سرویس هوش مصنوعی موقتاً در دسترس نیست. سهمیه شما کسر نشد.');
+
+    if (data.status === 402 || data?.quotaExceeded) {
+      if (loadingEl) loadingEl.remove();
+      openPaywallModal();
+      return;
+    }
+    if (data.status === 429) {
+      if (loadingEl) {
+        loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ ${escapeHtml(data?.message || 'لطفاً چند ثانیه صبر کنید.')}</span>`;
+      } else {
+        alert(data?.message || 'لطفاً چند ثانیه صبر کنید.');
+      }
+      return;
+    }
+    const isAiTimeoutOr503 = data.status === 503 || data.code === 'AI_UPSTREAM' || data.status === 408 || data.code === 'TIMEOUT' || (!data.ok && data.status === 0);
+    if (isAiTimeoutOr503) {
+      if (loadingEl) {
+        loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است یا ارتباط زمانبر شد (از سهمیه شما کسر نشد). لطفاً دوباره روی دکمه بپرس بزنید.</span>`;
+      }
       return;
     }
     if (data && data.ok) {
+      if (loadingEl) loadingEl.remove();
       window.TMA.triggerHaptic('success');
       if (box) {
         box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
@@ -1207,9 +1243,8 @@ window.sendExamImageToSolver = async function (imageBase64) {
     throw new Error(data?.message || 'Server error');
   } catch (err) {
     const loadingEl = document.getElementById(loadingId);
-    if (loadingEl) loadingEl.remove();
-    if (err?.message && err.message !== 'Server error') {
-      alert(err.message);
+    if (loadingEl) {
+      loadingEl.innerHTML = `<span style="color:#f59e0b;">⚠️ سرور هوش مصنوعی در حال حاضر شلوغ است یا ارتباط زمانبر شد (از سهمیه شما کسر نشد). لطفاً دوباره روی دکمه بپرس بزنید.</span>`;
     }
   }
 };
