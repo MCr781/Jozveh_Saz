@@ -113,14 +113,15 @@ export async function callGeminiGenerateContent({
 
   const generationConfig = {
     temperature: 0.2,
-    maxOutputTokens: 600,
+    maxOutputTokens: 4096,
     topP: 0.95,
     ...(payload?.generationConfig || {})
   };
 
   const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 75000;
+  const retryDelayMs = process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200;
 
-  async function executeRequest(targetModel) {
+  async function executeRequest(targetModel, currentKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -137,7 +138,7 @@ export async function callGeminiGenerateContent({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
+          'x-goog-api-key': currentKey
         },
         body: JSON.stringify(bodyPayload),
         signal: controller.signal
@@ -162,16 +163,143 @@ export async function callGeminiGenerateContent({
     }
   }
 
-  try {
-    return await executeRequest(model);
-  } catch (err) {
-    const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
-    if (isModelRetired && model !== 'gemini-3.8-flash') {
-      console.warn(`⚠️ Gemini model ${model} retired/unavailable (${err.message}). Retrying once with gemini-3.8-flash...`);
-      return await executeRequest('gemini-3.8-flash');
+  let activeModel = model;
+  let currentKey = apiKey;
+  const maxAttempts = 3;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      try {
+        return await executeRequest(activeModel, currentKey);
+      } catch (err) {
+        const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
+        if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
+          console.warn(`⚠️ Gemini model ${activeModel} retired/unavailable (${err.message}). Retrying once with gemini-3.8-flash...`);
+          activeModel = 'gemini-3.8-flash';
+          return await executeRequest(activeModel, currentKey);
+        }
+        throw err;
+      }
+    } catch (err) {
+      lastErr = err;
+      const isHighDemand = err.status === 503 || err.status === 429 || (err.message && (
+        err.message.includes('high demand') ||
+        err.message.includes('overloaded') ||
+        err.message.includes('UNAVAILABLE')
+      ));
+      if (isHighDemand && attempt < maxAttempts - 1) {
+        console.warn(`⚠️ Gemini 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${retryDelayMs}ms...`);
+        if (retryDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, retryDelayMs));
+        }
+        currentKey = getNextGeminiKey() || currentKey;
+        continue;
+      }
+      throw err;
     }
-    throw err;
   }
+
+  throw lastErr || new Error('GenerateContent request failed');
+}
+
+export async function callGeminiStreamGenerateContent({
+  apiKey = getNextGeminiKey(),
+  model = config.geminiModel || 'gemini-3.8-flash',
+  payload = {},
+  timeoutMs = 75000
+} = {}) {
+  if (!apiKey) return null;
+
+  const generationConfig = {
+    temperature: 0.2,
+    maxOutputTokens: 4096,
+    topP: 0.95,
+    ...(payload?.generationConfig || {})
+  };
+
+  const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 75000;
+  const retryDelayMs = process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200;
+
+  async function executeStream(targetModel, currentKey) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:streamGenerateContent?alt=sse`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(new Error(`The operation was aborted due to timeout (${effectiveTimeoutMs}ms)`));
+    }, effectiveTimeoutMs);
+
+    const bodyPayload = {
+      ...payload,
+      generationConfig
+    };
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': currentKey
+        },
+        body: JSON.stringify(bodyPayload),
+        signal: controller.signal
+      });
+
+      if (!res.ok) {
+        clearTimeout(timer);
+        const data = await res.json().catch(() => null);
+        const msg = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+        const err = new Error(msg);
+        err.status = res.status;
+        err.data = data;
+        throw err;
+      }
+
+      clearTimeout(timer);
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+  }
+
+  let activeModel = model;
+  let currentKey = apiKey;
+  const maxAttempts = 3;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      try {
+        return await executeStream(activeModel, currentKey);
+      } catch (err) {
+        const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
+        if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
+          console.warn(`⚠️ Gemini model ${activeModel} retired/unavailable. Retrying once with gemini-3.8-flash...`);
+          activeModel = 'gemini-3.8-flash';
+          return await executeStream(activeModel, currentKey);
+        }
+        throw err;
+      }
+    } catch (err) {
+      lastErr = err;
+      const isHighDemand = err.status === 503 || err.status === 429 || (err.message && (
+        err.message.includes('high demand') ||
+        err.message.includes('overloaded') ||
+        err.message.includes('UNAVAILABLE')
+      ));
+      if (isHighDemand && attempt < maxAttempts - 1) {
+        console.warn(`⚠️ Gemini stream 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${retryDelayMs}ms...`);
+        if (retryDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, retryDelayMs));
+        }
+        currentKey = getNextGeminiKey() || currentKey;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr || new Error('Stream request failed');
 }
 
 export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
@@ -1052,7 +1180,9 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const { courseId = 'sample_course', contextText, question, presetKey, imageBase64 } = JSON.parse(bodyRaw || '{}');
+        const bodyObj = JSON.parse(bodyRaw || '{}');
+        const { courseId = 'sample_course', contextText, question, presetKey, imageBase64, stream } = bodyObj;
+        const isStream = Boolean(stream) || String(req.headers['accept'] || '').includes('text/event-stream');
         const userId = String(auth.user.id);
         const st = getUserStats(userId);
 
@@ -1088,7 +1218,138 @@ export const server = http.createServer(async (req, res) => {
           return;
         }
 
+        const tutorPrompt = `تو دستیار هوشمند و رفیق شب امتحان دانشجوی مهندسی هستی. فقط بر اساس نکته ارائه‌شده، پاسخی بسیار کوتاه، خودمانی، ساده و حداکثر در ۲ یا ۳ بند بنویس. فرمول‌ها را درون KaTeX ($...$) بگذار و از هرگونه مقدمه‌چینی، احوالپرسی یا توضیحات طولانی پرهیز کن.
+
+نکته کارت درس:
+"""${cleanContext}"""
+
+پرسش دانشجو:
+"""${cleanQuestion}"""`;
+        const parts = [{ text: tutorPrompt }];
+        if (imageBase64) {
+          parts.unshift({ inlineData: { mimeType: 'image/jpeg', data: String(imageBase64).replace(/^data:image\/\w+;base64,/, '') } });
+        }
+
         const allowDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
+
+        // مسیر جریانی (SSE Streaming)
+        if (isStream) {
+          if (!getGeminiKeys().length) {
+            if (allowDemo) {
+              const demoReply = imageBase64
+                ? `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید.`
+                : `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند.`;
+
+              aiRepo.recordAiQuery(db, { userId, courseId, now });
+              st.lastChatAt = now;
+              st.usedAiQueries = currentQueries + 1;
+              saveDB();
+
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive'
+              });
+              res.write(`data: ${JSON.stringify({ chunk: demoReply })}\n\n`);
+              res.write('data: [DONE]\n\n');
+              res.end();
+              return;
+            } else {
+              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'سرویس هوش مصنوعی در حال حاضر پیکربندی نشده است.' }));
+              return;
+            }
+          }
+
+          try {
+            const upstreamRes = await callGeminiStreamGenerateContent({
+              payload: { contents: [{ parts }] }
+            });
+
+            if (!upstreamRes || !upstreamRes.ok) {
+              throw new Error('Gemini stream upstream failed');
+            }
+
+            // سهمیه به صورت اتمیک تنها پس از تایید اتصال 200 کسر می‌شود
+            aiRepo.recordAiQuery(db, { userId, courseId, now });
+            st.lastChatAt = now;
+            st.usedAiQueries = currentQueries + 1;
+            saveDB();
+
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive'
+            });
+
+            const reader = upstreamRes.body.getReader();
+            const decoder = new TextDecoder();
+            let streamBuf = '';
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              streamBuf += decoder.decode(value, { stream: true });
+              const lines = streamBuf.split(/\r?\n/);
+              streamBuf = lines.pop() || '';
+
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('data:')) {
+                  const jsonStr = trimmed.slice(5).trim();
+                  if (jsonStr && jsonStr !== '[DONE]') {
+                    try {
+                      const data = JSON.parse(jsonStr);
+                      const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                      if (chunk) {
+                        res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+                      }
+                    } catch (_) {}
+                  }
+                }
+              }
+            }
+
+            if (streamBuf.trim().startsWith('data:')) {
+              const jsonStr = streamBuf.trim().slice(5).trim();
+              if (jsonStr && jsonStr !== '[DONE]') {
+                try {
+                  const data = JSON.parse(jsonStr);
+                  const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                  if (chunk) {
+                    res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+                  }
+                } catch (_) {}
+              }
+            }
+
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          } catch (err) {
+            console.error('Gemini ask-tutor stream error:', err.message);
+            if (allowDemo) {
+              aiRepo.recordAiQuery(db, { userId, courseId, now });
+              st.lastChatAt = now;
+              st.usedAiQueries = currentQueries + 1;
+              saveDB();
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive'
+              });
+              res.write(`data: ${JSON.stringify({ chunk: '💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، مقادیر در شرایط استاندارد سنجیده می‌شوند.' })}\n\n`);
+              res.write('data: [DONE]\n\n');
+              res.end();
+              return;
+            }
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'خطا در برقراری ارتباط با مدل هوش مصنوعی. لطفاً دوباره تلاش کنید.' }));
+            return;
+          }
+        }
+
+        // مسیر استاندارد غیرجریانی (JSON Response)
         let replyText = '';
 
         if (!getGeminiKeys().length) {
@@ -1105,17 +1366,6 @@ export const server = http.createServer(async (req, res) => {
           }
         } else {
           try {
-            const tutorPrompt = `تو دستیار هوشمند و رفیق شب امتحان دانشجوی مهندسی هستی. فقط بر اساس نکته ارائه‌شده، پاسخی بسیار کوتاه، خودمانی، ساده و حداکثر در ۲ یا ۳ بند بنویس. فرمول‌ها را درون KaTeX ($...$) بگذار و از هرگونه مقدمه‌چینی، احوالپرسی یا توضیحات طولانی پرهیز کن.
-
-نکته کارت درس:
-"""${cleanContext}"""
-
-پرسش دانشجو:
-"""${cleanQuestion}"""`;
-            const parts = [{ text: tutorPrompt }];
-            if (imageBase64) {
-              parts.unshift({ inlineData: { mimeType: 'image/jpeg', data: String(imageBase64).replace(/^data:image\/\w+;base64,/, '') } });
-            }
             replyText = await callGeminiRestServer({
               contents: [{ parts }]
             });

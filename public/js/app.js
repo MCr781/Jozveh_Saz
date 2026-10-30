@@ -118,7 +118,18 @@ function renderLatexExpression(latex, displayMode = false) {
 
 function renderTextWithMath(text) {
   if (!text) return '';
-  const sanitized = sanitizeLatex(text);
+  let sanitized = sanitizeLatex(text);
+
+  // Auto-balance unclosed $$ or $ delimiters (e.g. during live streaming or if cut off)
+  const doubleCount = (sanitized.match(/\$\$/g) || []).length;
+  if (doubleCount % 2 !== 0) {
+    sanitized += '$$';
+  } else {
+    const singleMatches = sanitized.replace(/\$\$/g, '').match(/\$/g) || [];
+    if (singleMatches.length % 2 !== 0) {
+      sanitized += '$';
+    }
+  }
 
   const mathTokens = [];
   // 1. Block math $$...$$
@@ -740,6 +751,93 @@ window.closeContextualDrawer = function () {
   document.getElementById('aiDrawerBackdrop').classList.remove('open');
 };
 
+async function streamTutorAnswer(payload, onChunk) {
+  const apiBase = getApiBase();
+  const url = `${apiBase}/api/ask-tutor`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 80000);
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream',
+    'X-Telegram-Init-Data': getTelegramInitData()
+  };
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, stream: true }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const contentType = res.headers.get('content-type') || '';
+
+    // If server responded with JSON (e.g. error 402, 429, 503, or non-stream response)
+    if (contentType.includes('application/json') || !res.ok) {
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        return {
+          ok: false,
+          status: res.status,
+          code: data?.code || `HTTP_${res.status}`,
+          message: data?.message || data?.error || res.statusText,
+          quotaExceeded: Boolean(data?.quotaExceeded)
+        };
+      }
+      return data;
+    }
+
+    if (contentType.includes('text/event-stream')) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('data:')) {
+            const dataStr = trimmed.slice(5).trim();
+            if (dataStr === '[DONE]') {
+              break;
+            }
+            if (dataStr) {
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.chunk) {
+                  accumulated += parsed.chunk;
+                  if (typeof onChunk === 'function') {
+                    onChunk(accumulated, parsed.chunk);
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+        }
+      }
+
+      return { ok: true, reply: accumulated, streamed: true };
+    }
+
+    const text = await res.text();
+    return { ok: true, reply: text };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      return { ok: false, status: 408, code: 'TIMEOUT', message: 'مهلت پاسخ‌دهی به پایان رسید (۸۰ ثانیه).' };
+    }
+    return { ok: false, status: 0, code: 'NETWORK_ERROR', message: err.message || 'خطای ارتباط با سرور' };
+  }
+}
+
 window.sendContextualPrompt = async function (presetKey, customText) {
   if (!AppState.isProUnlocked && AppState.aiRemainingFree <= 0) {
     closeContextualDrawer();
@@ -769,14 +867,17 @@ window.sendContextualPrompt = async function (presetKey, customText) {
     : (AppState.course?.title || '');
 
   try {
-    const data = await api('/api/ask-tutor', {
-      method: 'POST',
-      body: JSON.stringify({
-        courseId: AppState.course?.id || 'sample_course',
-        contextText: contextDesc,
-        question: userMsg,
-        presetKey
-      })
+    const data = await streamTutorAnswer({
+      courseId: AppState.course?.id || 'sample_course',
+      contextText: contextDesc,
+      question: userMsg,
+      presetKey
+    }, (accumulatedText) => {
+      const el = document.getElementById(loadingId);
+      if (el) {
+        el.innerHTML = renderTextWithMath(accumulatedText);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
     });
 
     const loadingEl = document.getElementById(loadingId);
@@ -806,14 +907,17 @@ window.sendContextualPrompt = async function (presetKey, customText) {
     }
 
     if (data && data.ok) {
-      if (loadingEl) loadingEl.remove();
       window.TMA.triggerHaptic('success');
-      chatBox.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
-      chatBox.scrollTop = chatBox.scrollHeight;
+      if (loadingEl) {
+        loadingEl.innerHTML = renderTextWithMath(data.reply);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
       if (data.remainingAiQuota !== undefined) {
         AppState.aiRemainingFree = data.remainingAiQuota;
-        renderAiQuotaBadge();
+      } else if (AppState.aiRemainingFree > 0) {
+        AppState.aiRemainingFree = Math.max(0, AppState.aiRemainingFree - 1);
       }
+      renderAiQuotaBadge();
       return;
     }
     throw new Error(data?.message || 'Server error');
@@ -849,14 +953,17 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
   box.scrollTop = box.scrollHeight;
 
   try {
-    const data = await api('/api/ask-tutor', {
-      method: 'POST',
-      body: JSON.stringify({
-        courseId: AppState.course?.id || 'sample_course',
-        contextText: AppState.course?.title || '',
-        question,
-        presetKey
-      })
+    const data = await streamTutorAnswer({
+      courseId: AppState.course?.id || 'sample_course',
+      contextText: AppState.course?.title || '',
+      question,
+      presetKey
+    }, (accumulatedText) => {
+      const el = document.getElementById(loadingId);
+      if (el) {
+        el.innerHTML = renderTextWithMath(accumulatedText);
+        box.scrollTop = box.scrollHeight;
+      }
     });
 
     const loadingEl = document.getElementById(loadingId);
@@ -885,14 +992,17 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
     }
 
     if (data && data.ok) {
-      if (loadingEl) loadingEl.remove();
       window.TMA.triggerHaptic('success');
-      box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
-      box.scrollTop = box.scrollHeight;
+      if (loadingEl) {
+        loadingEl.innerHTML = renderTextWithMath(data.reply);
+        box.scrollTop = box.scrollHeight;
+      }
       if (data.remainingAiQuota !== undefined) {
         AppState.aiRemainingFree = data.remainingAiQuota;
-        renderAiQuotaBadge();
+      } else if (AppState.aiRemainingFree > 0) {
+        AppState.aiRemainingFree = Math.max(0, AppState.aiRemainingFree - 1);
       }
+      renderAiQuotaBadge();
       return;
     }
     throw new Error(data?.message || 'Server error');
@@ -1198,15 +1308,18 @@ window.sendExamImageToSolver = async function (imageBase64) {
     box.scrollTop = box.scrollHeight;
   }
   try {
-    const data = await api('/api/ask-tutor', {
-      method: 'POST',
-      body: JSON.stringify({
-        courseId: AppState.course?.id || 'sample_course',
-        contextText: AppState.course?.title || '',
-        question: 'صورت سوال امتحانی موجود در تصویر را با روش و فرمول‌های استاد حل کن.',
-        presetKey: 'example',
-        imageBase64
-      })
+    const data = await streamTutorAnswer({
+      courseId: AppState.course?.id || 'sample_course',
+      contextText: AppState.course?.title || '',
+      question: 'صورت سوال امتحانی موجود در تصویر را با روش و فرمول‌های استاد حل کن.',
+      presetKey: 'example',
+      imageBase64
+    }, (accumulatedText) => {
+      const el = document.getElementById(loadingId);
+      if (el) {
+        el.innerHTML = renderTextWithMath(accumulatedText);
+        if (box) box.scrollTop = box.scrollHeight;
+      }
     });
     const loadingEl = document.getElementById(loadingId);
 
@@ -1231,13 +1344,17 @@ window.sendExamImageToSolver = async function (imageBase64) {
       return;
     }
     if (data && data.ok) {
-      if (loadingEl) loadingEl.remove();
       window.TMA.triggerHaptic('success');
-      if (box) {
-        box.innerHTML += `<div class="chat-bubble ai">${renderTextWithMath(data.reply)}</div>`;
-        box.scrollTop = box.scrollHeight;
+      if (loadingEl) {
+        loadingEl.innerHTML = renderTextWithMath(data.reply);
+        if (box) box.scrollTop = box.scrollHeight;
       }
-      if (data.remainingAiQuota !== undefined) { AppState.aiRemainingFree = data.remainingAiQuota; renderAiQuotaBadge(); }
+      if (data.remainingAiQuota !== undefined) {
+        AppState.aiRemainingFree = data.remainingAiQuota;
+      } else if (AppState.aiRemainingFree > 0) {
+        AppState.aiRemainingFree = Math.max(0, AppState.aiRemainingFree - 1);
+      }
+      renderAiQuotaBadge();
       return;
     }
     throw new Error(data?.message || 'Server error');

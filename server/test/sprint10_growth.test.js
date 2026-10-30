@@ -52,48 +52,143 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.equal(config.geminiModel, 'gemini-3.8-flash');
   });
 
-  it('callGeminiGenerateContent formats clean low-latency generationConfig without thinkingConfig', async () => {
+  it('maxOutputTokens defaults to 4096 so reasoning tokens never truncate visible formulas', async () => {
     const originalFetch = global.fetch;
-    const fetchCalls = [];
+    let sentGenConfig = null;
 
     global.fetch = async (url, opts) => {
       const body = JSON.parse(opts.body);
-      fetchCalls.push({ url, body, opts });
-
-      // Verify clean generationConfig: no thinkingConfig, standard low-latency parameters
-      assert.equal(body.generationConfig.temperature, 0.2);
-      assert.equal(body.generationConfig.maxOutputTokens, 600);
-      assert.equal(body.generationConfig.topP, 0.95);
-      assert.equal(body.generationConfig.thinkingConfig, undefined, 'thinkingConfig must NOT be present');
-      assert.ok(opts.signal, 'Must pass AbortSignal');
-
+      sentGenConfig = body.generationConfig;
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          candidates: [
-            {
-              content: {
-                parts: [{ text: 'پاسخ فشرده و مستقیم بدون تاخیر' }]
-              }
-            }
-          ]
+          candidates: [{ content: { parts: [{ text: 'فرمول $r^{*} = \\frac{2\\gamma}{\\Delta G_v}$' }] } }]
         })
       };
     };
 
     try {
-      const result = await callGeminiGenerateContent({
+      const res = await callGeminiGenerateContent({
         apiKey: 'test-api-key',
         model: 'gemini-3.8-flash',
-        payload: {
-          contents: [{ parts: [{ text: 'فرمول کار در ترمودینامیک چیست؟' }] }]
-        },
+        payload: { contents: [{ parts: [{ text: 'شعاع بحرانی چیست؟' }] }] },
         timeoutMs: 1000
       });
+      assert.equal(sentGenConfig.maxOutputTokens, 4096);
+      assert.equal(sentGenConfig.temperature, 0.2);
+      assert.equal(sentGenConfig.topP, 0.95);
+      assert.equal(sentGenConfig.thinkingConfig, undefined);
+      assert.ok(res.includes('$r^{*} ='));
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 
-      assert.equal(fetchCalls.length, 1, 'Must execute direct request without 400 retry waste');
-      assert.equal(result, 'پاسخ فشرده و مستقیم بدون تاخیر');
+  it('automatic retry succeeds when upstream returns a transient 503 High Demand on attempt 1 and 200 on attempt 2', async () => {
+    const originalFetch = global.fetch;
+    const prevDelay = process.env.GEMINI_RETRY_DELAY_MS;
+    process.env.GEMINI_RETRY_DELAY_MS = '10'; // Fast retry for unit tests
+    let attemptCount = 0;
+
+    global.fetch = async (url, opts) => {
+      attemptCount++;
+      if (attemptCount === 1) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: async () => ({
+            error: {
+              code: 503,
+              message: 'This model is currently experiencing high demand. Please try again later.'
+            }
+          })
+        };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'پاسخ موفق پس از تلاش مجدد' }] } }]
+        })
+      };
+    };
+
+    try {
+      const res = await callGeminiGenerateContent({
+        apiKey: 'test-api-key',
+        model: 'gemini-3.8-flash',
+        payload: { contents: [{ parts: [{ text: 'تست تاب‌آوری' }] }] },
+        timeoutMs: 2000
+      });
+      assert.equal(attemptCount, 2, 'Should succeed on attempt 2');
+      assert.equal(res, 'پاسخ موفق پس از تلاش مجدد');
+    } finally {
+      global.fetch = originalFetch;
+      if (prevDelay !== undefined) process.env.GEMINI_RETRY_DELAY_MS = prevDelay;
+      else delete process.env.GEMINI_RETRY_DELAY_MS;
+    }
+  });
+
+  it('POST /api/ask-tutor with stream: true streams SSE chunks and deducts quota once', async () => {
+    const studentId = 777333;
+    const studentAuth = mintInitData({ id: studentId, first_name: 'StreamStudent' }, testToken);
+    const originalFetch = global.fetch;
+
+    global.fetch = async (url, opts) => {
+      if (String(url).includes('streamGenerateContent')) {
+        const chunks = [
+          'data: {"candidates": [{"content": {"parts": [{"text": "پاسخ "}]}}]}\n\n',
+          'data: {"candidates": [{"content": {"parts": [{"text": "گام به گام $r^{*} = 5$ "}]}}]}\n\n',
+          'data: [DONE]\n\n'
+        ];
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const c of chunks) {
+              controller.enqueue(new TextEncoder().encode(c));
+            }
+            controller.close();
+          }
+        });
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'Content-Type': 'text/event-stream' }),
+          body: stream
+        };
+      }
+      return originalFetch(url, opts);
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/api/ask-tutor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'X-Telegram-Init-Data': studentAuth
+        },
+        body: JSON.stringify({
+          courseId: 'sample_course',
+          contextText: 'شعاع بحرانی جوانه زنی',
+          question: 'فرمول شعاع بحرانی چیست؟',
+          stream: true
+        })
+      });
+
+      assert.equal(res.status, 200);
+      assert.ok(res.headers.get('content-type')?.includes('text/event-stream'));
+
+      const bodyText = await res.text();
+      assert.ok(bodyText.includes('data: {"chunk":"پاسخ "}'));
+      assert.ok(bodyText.includes('data: {"chunk":"گام به گام $r^{*} = 5$ "}'));
+      assert.ok(bodyText.includes('data: [DONE]'));
+
+      const { aiRepo } = await import('../server.js');
+      const usage = aiRepo.getAiUsage(db, String(studentId), 'sample_course');
+      assert.equal(usage.queriesCount, 1);
     } finally {
       global.fetch = originalFetch;
     }

@@ -40,10 +40,11 @@ export async function callGeminiRest({ contents, generationConfig, model = confi
   const maxRetries = Math.max(1, getGeminiApiKeys().length);
   let lastError = null;
   const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || 75000;
+  const retryDelayMs = process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200;
 
   const effectiveGenConfig = {
     temperature: 0.2,
-    maxOutputTokens: 600,
+    maxOutputTokens: 4096,
     topP: 0.95,
     ...(generationConfig || {})
   };
@@ -103,9 +104,17 @@ export async function callGeminiRest({ contents, generationConfig, model = confi
       }
     } catch (err) {
       lastError = err;
+      const isHighDemand = err.status === 503 || err.status === 429 || (err.message && (
+        err.message.includes('high demand') ||
+        err.message.includes('overloaded') ||
+        err.message.includes('UNAVAILABLE')
+      ));
       console.warn(`[Gemini REST Attempt ${attempt + 1}] Warning: ${err.message}`);
       if (attempt < maxRetries - 1) {
-        await new Promise((r) => setTimeout(r, 1000));
+        const delay = isHighDemand ? retryDelayMs : 1000;
+        if (delay > 0) {
+          await new Promise((r) => setTimeout(r, delay));
+        }
       }
     }
   }
