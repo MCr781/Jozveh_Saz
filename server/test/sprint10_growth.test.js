@@ -52,7 +52,7 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.equal(config.geminiModel, 'gemini-3.8-flash');
   });
 
-  it('callGeminiGenerateContent injects low-latency generationConfig and retries without thinkingConfig on 400', async () => {
+  it('callGeminiGenerateContent formats clean low-latency generationConfig without thinkingConfig', async () => {
     const originalFetch = global.fetch;
     const fetchCalls = [];
 
@@ -60,49 +60,26 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
       const body = JSON.parse(opts.body);
       fetchCalls.push({ url, body, opts });
 
-      if (fetchCalls.length === 1) {
-        // First call must inject fast generation settings (thinkingConfig: { thinkingBudget: 0 })
-        assert.equal(body.generationConfig.temperature, 0.3);
-        assert.equal(body.generationConfig.maxOutputTokens, 800);
-        assert.deepEqual(body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
-        assert.ok(opts.signal, 'Must pass AbortSignal');
+      // Verify clean generationConfig: no thinkingConfig, standard low-latency parameters
+      assert.equal(body.generationConfig.temperature, 0.2);
+      assert.equal(body.generationConfig.maxOutputTokens, 600);
+      assert.equal(body.generationConfig.topP, 0.95);
+      assert.equal(body.generationConfig.thinkingConfig, undefined, 'thinkingConfig must NOT be present');
+      assert.ok(opts.signal, 'Must pass AbortSignal');
 
-        // Simulate upstream Gemini returning 400 unknown field thinkingConfig
-        return {
-          ok: false,
-          status: 400,
-          statusText: 'Bad Request',
-          json: async () => ({
-            error: {
-              code: 400,
-              message: 'Invalid JSON payload received. Unknown field: thinkingConfig'
-            }
-          })
-        };
-      }
-
-      if (fetchCalls.length === 2) {
-        // Second call must have thinkingConfig stripped
-        assert.equal(body.generationConfig.temperature, 0.3);
-        assert.equal(body.generationConfig.maxOutputTokens, 800);
-        assert.equal(body.generationConfig.thinkingConfig, undefined);
-
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'پاسخ فشرده و سریع بدون تفکر' }]
-                }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'پاسخ فشرده و مستقیم بدون تاخیر' }]
               }
-            ]
-          })
-        };
-      }
-
-      throw new Error('Unexpected extra fetch call');
+            }
+          ]
+        })
+      };
     };
 
     try {
@@ -110,13 +87,13 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
         apiKey: 'test-api-key',
         model: 'gemini-3.8-flash',
         payload: {
-          contents: [{ parts: [{ text: 'فرمول پایستگی انرژی چیست؟' }] }]
+          contents: [{ parts: [{ text: 'فرمول کار در ترمودینامیک چیست؟' }] }]
         },
         timeoutMs: 1000
       });
 
-      assert.equal(fetchCalls.length, 2, 'Must have executed exactly 2 requests');
-      assert.equal(result, 'پاسخ فشرده و سریع بدون تفکر');
+      assert.equal(fetchCalls.length, 1, 'Must execute direct request without 400 retry waste');
+      assert.equal(result, 'پاسخ فشرده و مستقیم بدون تاخیر');
     } finally {
       global.fetch = originalFetch;
     }

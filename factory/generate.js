@@ -39,18 +39,16 @@ export function getNextApiKey() {
 export async function callGeminiRest({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
   const maxRetries = Math.max(1, getGeminiApiKeys().length);
   let lastError = null;
-  const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || 45000;
+  const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || 75000;
 
-  const fastDefaults = {
-    temperature: 0.3,
-    thinkingConfig: { thinkingBudget: 0 }
-  };
   const effectiveGenConfig = {
-    ...fastDefaults,
+    temperature: 0.2,
+    maxOutputTokens: 600,
+    topP: 0.95,
     ...(generationConfig || {})
   };
 
-  async function doRequest(apiKey, targetModel, genCfg) {
+  async function doRequest(apiKey, targetModel) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -64,7 +62,7 @@ export async function callGeminiRest({ contents, generationConfig, model = confi
           'Content-Type': 'application/json',
           'x-goog-api-key': apiKey
         },
-        body: JSON.stringify({ contents, generationConfig: genCfg }),
+        body: JSON.stringify({ contents, generationConfig: effectiveGenConfig }),
         signal: controller.signal
       });
 
@@ -88,38 +86,18 @@ export async function callGeminiRest({ contents, generationConfig, model = confi
     }
   }
 
-  async function doRequestWithRetry(apiKey, targetModel) {
-    try {
-      return await doRequest(apiKey, targetModel, effectiveGenConfig);
-    } catch (err) {
-      const is400WithThinking = (err.status === 400) && effectiveGenConfig?.thinkingConfig && (
-        !err.message ||
-        err.message.toLowerCase().includes('thinking') ||
-        err.message.toLowerCase().includes('unknown') ||
-        err.message.toLowerCase().includes('invalid') ||
-        err.message.toLowerCase().includes('unrecognized')
-      );
-      if (is400WithThinking) {
-        console.warn(`⚠️ Gemini Factory 400 with thinkingConfig (${err.message}). Retrying without thinkingConfig...`);
-        const { thinkingConfig, ...cfgWithoutThinking } = effectiveGenConfig;
-        return await doRequest(apiKey, targetModel, cfgWithoutThinking);
-      }
-      throw err;
-    }
-  }
-
   let activeModel = model;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const apiKey = getNextApiKey();
     try {
       try {
-        return await doRequestWithRetry(apiKey, activeModel);
+        return await doRequest(apiKey, activeModel);
       } catch (reqErr) {
         const isModelRetired = reqErr.status === 404 || (reqErr.message && (reqErr.message.includes('no longer available') || reqErr.message.includes('not found')));
         if (isModelRetired && activeModel !== 'gemini-3.8-flash') {
           console.warn(`⚠️ Model ${activeModel} unavailable (${reqErr.message}). Falling back to gemini-3.8-flash...`);
           activeModel = 'gemini-3.8-flash';
-          return await doRequestWithRetry(apiKey, activeModel);
+          return await doRequest(apiKey, activeModel);
         }
         throw reqErr;
       }

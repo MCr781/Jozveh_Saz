@@ -107,23 +107,20 @@ export async function callGeminiGenerateContent({
   apiKey = getNextGeminiKey(),
   model = config.geminiModel || 'gemini-3.8-flash',
   payload = {},
-  timeoutMs = 45000
+  timeoutMs = 75000
 } = {}) {
   if (!apiKey) return null;
 
-  const fastDefaults = {
-    temperature: 0.3,
-    maxOutputTokens: 800,
-    thinkingConfig: { thinkingBudget: 0 }
-  };
-  const effectiveGenConfig = {
-    ...fastDefaults,
+  const generationConfig = {
+    temperature: 0.2,
+    maxOutputTokens: 600,
+    topP: 0.95,
     ...(payload?.generationConfig || {})
   };
 
-  const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 45000;
+  const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 75000;
 
-  async function executeRequest(targetModel, genConfig) {
+  async function executeRequest(targetModel) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -132,7 +129,7 @@ export async function callGeminiGenerateContent({
 
     const bodyPayload = {
       ...payload,
-      generationConfig: genConfig
+      generationConfig
     };
 
     try {
@@ -165,33 +162,13 @@ export async function callGeminiGenerateContent({
     }
   }
 
-  async function executeWithRetry(targetModel) {
-    try {
-      return await executeRequest(targetModel, effectiveGenConfig);
-    } catch (err) {
-      const is400WithThinking = (err.status === 400) && effectiveGenConfig?.thinkingConfig && (
-        !err.message ||
-        err.message.toLowerCase().includes('thinking') ||
-        err.message.toLowerCase().includes('unknown') ||
-        err.message.toLowerCase().includes('invalid') ||
-        err.message.toLowerCase().includes('unrecognized')
-      );
-      if (is400WithThinking) {
-        console.warn(`⚠️ Gemini API 400 with thinkingConfig (${err.message}). Retrying once without thinkingConfig...`);
-        const { thinkingConfig, ...configWithoutThinking } = effectiveGenConfig;
-        return await executeRequest(targetModel, configWithoutThinking);
-      }
-      throw err;
-    }
-  }
-
   try {
-    return await executeWithRetry(model);
+    return await executeRequest(model);
   } catch (err) {
     const isModelRetired = err.status === 404 || (err.message && (err.message.includes('no longer available') || err.message.includes('not found')));
     if (isModelRetired && model !== 'gemini-3.8-flash') {
       console.warn(`⚠️ Gemini model ${model} retired/unavailable (${err.message}). Retrying once with gemini-3.8-flash...`);
-      return await executeWithRetry('gemini-3.8-flash');
+      return await executeRequest('gemini-3.8-flash');
     }
     throw err;
   }
@@ -1101,7 +1078,9 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const cleanQuestion = String(question || '').trim().slice(0, 350);
-        const cleanContext = String(contextText || '').trim().slice(0, 500);
+        // Truncate card context strictly to max 300 words
+        const cardWords = String(contextText || '').trim().split(/\s+/).slice(0, 300);
+        const cleanContext = cardWords.join(' ');
 
         if (!cleanQuestion && !imageBase64) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1126,24 +1105,19 @@ export const server = http.createServer(async (req, res) => {
           }
         } else {
           try {
-            const tutorPrompt = `
-شما دستیار حل تمرین و رفع اشکال امتحانی جزوه دانشگاهی هستید.
-مبحث جزوه استاد: """${cleanContext}"""
-پرسش دانشجو: """${cleanQuestion}"""
+            const tutorPrompt = `تو دستیار هوشمند و رفیق شب امتحان دانشجوی مهندسی هستی. فقط بر اساس نکته ارائه‌شده، پاسخی بسیار کوتاه، خودمانی، ساده و حداکثر در ۲ یا ۳ بند بنویس. فرمول‌ها را درون KaTeX ($...$) بگذار و از هرگونه مقدمه‌چینی، احوالپرسی یا توضیحات طولانی پرهیز کن.
 
-دستورالعمل حیاتی پاسخ سریع و فشرده (زیر ۱۵۰ کلمه):
-۱. پاسخ را بسیار کوتاه، امتحانی، صریح و بدون حاشیه در حداکثر ۱۵۰ کلمه بنویس.
-۲. روند مستقیم: فرمول اصلی -> جایگذاری اعداد -> پاسخ نهایی با یکای استاندارد.
-۳. تمام فرمول‌ها و متغیرها را داخل $...$ یا $$...$$ با سینتکس استاندارد KaTeX قرار بده.
-۴. از هرگونه مقدمه‌چینی، احوالپرسی یا توضیحات اضافه پرهیز کن.
-`;
+نکته کارت درس:
+"""${cleanContext}"""
+
+پرسش دانشجو:
+"""${cleanQuestion}"""`;
             const parts = [{ text: tutorPrompt }];
             if (imageBase64) {
               parts.unshift({ inlineData: { mimeType: 'image/jpeg', data: String(imageBase64).replace(/^data:image\/\w+;base64,/, '') } });
             }
             replyText = await callGeminiRestServer({
-              contents: [{ parts }],
-              generationConfig: { temperature: 0.25 }
+              contents: [{ parts }]
             });
             if (!replyText) throw new Error('Empty response from AI upstream');
           } catch (err) {

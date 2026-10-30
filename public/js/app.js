@@ -47,7 +47,7 @@ async function api(path, options = {}) {
     path.startsWith('/api/report-issue') ||
     path.startsWith('/api/factory')
   );
-  const timeoutMs = options.timeoutMs || (isAiOrLongRunningRoute ? 50000 : 15000);
+  const timeoutMs = options.timeoutMs || (isAiOrLongRunningRoute ? 80000 : 15000);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
