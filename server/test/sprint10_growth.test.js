@@ -20,6 +20,8 @@ process.env.BOT_TOKEN = testToken;
 process.env.STATE_DB_PATH = testDbPath;
 process.env.PORT = '0';
 process.env.ADMIN_CHAT_ID = '999999';
+// Ensure key is available dynamically for CI runs without .env
+process.env.GEMINI_API_KEY_1 = process.env.GEMINI_API_KEY_1 || 'test-ci-gemini-key';
 
 const {
   server,
@@ -186,6 +188,73 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
       assert.ok(bodyText.includes('data: {"chunk":"گام به گام $r^{*} = 5$ "}'));
       assert.ok(bodyText.includes('data: [DONE]'));
 
+      const { aiRepo } = await import('../server.js');
+      const usage = aiRepo.getAiUsage(db, String(studentId), 'sample_course');
+      assert.equal(usage.queriesCount, 1);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('POST /api/ask-tutor falls back to word-chunked SSE when native stream fails', async () => {
+    const studentId = 777444;
+    const studentAuth = mintInitData({ id: studentId, first_name: 'FallbackStudent' }, testToken);
+    const originalFetch = global.fetch;
+
+    global.fetch = async (url, opts) => {
+      if (String(url).includes('streamGenerateContent')) {
+        // Simulate native stream failure with 503
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: async () => ({ error: { message: 'High demand' } })
+        };
+      }
+      if (String(url).includes('generateContent')) {
+        // Fallback non-streaming generateContent succeeds
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'پاسخ رفیق شب امتحان با رابطه $W = 100 J$ در فشار ثابت' }]
+                }
+              }
+            ]
+          })
+        };
+      }
+      return originalFetch(url, opts);
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/api/ask-tutor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'X-Telegram-Init-Data': studentAuth
+        },
+        body: JSON.stringify({
+          courseId: 'sample_course',
+          contextText: 'محاسبه کار انبساط',
+          question: 'کار چگونه محاسبه می شود؟',
+          stream: true
+        })
+      });
+
+      assert.equal(res.status, 200);
+      assert.ok(res.headers.get('content-type')?.includes('text/event-stream'));
+      assert.equal(res.headers.get('x-accel-buffering'), 'no');
+
+      const bodyText = await res.text();
+      assert.ok(bodyText.includes('data: {"chunk":'));
+      assert.ok(bodyText.includes('[DONE]'));
+
+      // Quota deducted once
       const { aiRepo } = await import('../server.js');
       const usage = aiRepo.getAiUsage(db, String(studentId), 'sample_course');
       assert.equal(usage.queriesCount, 1);

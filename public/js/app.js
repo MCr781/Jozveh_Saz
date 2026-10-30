@@ -149,12 +149,18 @@ function renderTextWithMath(text) {
   // 3. Escape all non-math text so <img src=x onerror=...> never executes
   let escaped = escapeHtml(withTokens);
 
+  // Markdown bold **text** support on non-math segments
+  escaped = escaped.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+
+  // Convert newlines to <br> on non-math segments
+  escaped = escaped.replace(/\n/g, '<br>');
+
   // 4. Restore rendered KaTeX
   escaped = escaped.replace(/___MATH_(?:BLOCK|INLINE)_(\d+)___/g, (_, idx) => {
     return mathTokens[Number(idx)] || '';
   });
 
-  return escaped.replace(/\n/g, '<br>');
+  return escaped;
 }
 
 function buildWatermarkHTML() {
@@ -751,6 +757,49 @@ window.closeContextualDrawer = function () {
   document.getElementById('aiDrawerBackdrop').classList.remove('open');
 };
 
+function tokenizeIntoTypewriterQueue(chunkText, tokenState, tokenQueue) {
+  tokenState.pending = (tokenState.pending || '') + chunkText;
+
+  while (tokenState.pending.length > 0) {
+    // 1. Block math $$...$$
+    if (tokenState.pending.startsWith('$$')) {
+      const closeIdx = tokenState.pending.indexOf('$$', 2);
+      if (closeIdx === -1) {
+        break; // Wait for closing $$ from next chunk
+      }
+      tokenQueue.push(tokenState.pending.slice(0, closeIdx + 2));
+      tokenState.pending = tokenState.pending.slice(closeIdx + 2);
+      continue;
+    }
+
+    // 2. Inline math $...$
+    if (tokenState.pending.startsWith('$')) {
+      const closeIdx = tokenState.pending.indexOf('$', 1);
+      if (closeIdx === -1) {
+        break; // Wait for closing $ from next chunk
+      }
+      tokenQueue.push(tokenState.pending.slice(0, closeIdx + 1));
+      tokenState.pending = tokenState.pending.slice(closeIdx + 1);
+      continue;
+    }
+
+    // 3. Plain text segment before next math delimiter
+    const nextMathIdx = tokenState.pending.indexOf('$');
+    const plain = nextMathIdx === -1 ? tokenState.pending : tokenState.pending.slice(0, nextMathIdx);
+    if (!plain) continue;
+
+    const words = plain.match(/\S+\s*/g) || [plain];
+    let consumed = 0;
+    for (let i = 0; i < words.length; i += 2) {
+      const group = (words[i] || '') + (words[i + 1] || '');
+      tokenQueue.push(group);
+      consumed += group.length;
+    }
+
+    tokenState.pending = tokenState.pending.slice(consumed);
+  }
+}
+
 async function streamTutorAnswer(payload, onChunk) {
   const apiBase = getApiBase();
   const url = `${apiBase}/api/ask-tutor`;
@@ -792,8 +841,48 @@ async function streamTutorAnswer(payload, onChunk) {
     if (contentType.includes('text/event-stream')) {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let accumulated = '';
       let buffer = '';
+      let isDone = false;
+      const tokenQueue = [];
+      const tokenState = { pending: '' };
+      let displayedText = '';
+
+      const tickMs = (typeof window !== 'undefined' && window.__FAST_TEST_STREAM) ? 0 : 25;
+
+      const drainPromise = new Promise((resolve) => {
+        function tick() {
+          if (tokenQueue.length > 0) {
+            const tok = tokenQueue.shift();
+            displayedText += tok;
+            if (typeof onChunk === 'function') {
+              onChunk(displayedText, tok);
+            }
+          }
+
+          if (isDone && tokenQueue.length === 0) {
+            resolve();
+            return;
+          }
+
+          if (tickMs === 0) {
+            while (tokenQueue.length > 0) {
+              const tok = tokenQueue.shift();
+              displayedText += tok;
+              if (typeof onChunk === 'function') {
+                onChunk(displayedText, tok);
+              }
+            }
+            if (isDone) {
+              resolve();
+              return;
+            }
+            setTimeout(tick, 0);
+          } else {
+            setTimeout(tick, tickMs);
+          }
+        }
+        tick();
+      });
 
       while (true) {
         const { done, value } = await reader.read();
@@ -813,10 +902,7 @@ async function streamTutorAnswer(payload, onChunk) {
               try {
                 const parsed = JSON.parse(dataStr);
                 if (parsed.chunk) {
-                  accumulated += parsed.chunk;
-                  if (typeof onChunk === 'function') {
-                    onChunk(accumulated, parsed.chunk);
-                  }
+                  tokenizeIntoTypewriterQueue(parsed.chunk, tokenState, tokenQueue);
                 }
               } catch (_) {}
             }
@@ -824,7 +910,14 @@ async function streamTutorAnswer(payload, onChunk) {
         }
       }
 
-      return { ok: true, reply: accumulated, streamed: true };
+      isDone = true;
+      if (tokenState.pending) {
+        tokenQueue.push(tokenState.pending);
+        tokenState.pending = '';
+      }
+
+      await drainPromise;
+      return { ok: true, reply: displayedText, streamed: true };
     }
 
     const text = await res.text();

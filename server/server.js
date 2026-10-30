@@ -51,18 +51,26 @@ const sqlitePath = rawDbPath.endsWith('.json') ? rawDbPath.replace(/\.json$/i, '
 const db = openDb(sqlitePath);
 migrate(db);
 
+export function getActiveGeminiKeys() {
+  const all = [
+    process.env.GEMINI_API_KEY_1,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+    ...(config.geminiApiKeys || []),
+    ...(config.geminiKeys || [])
+  ]
+    .map((k) => (k || '').trim())
+    .filter((k) => k && !k.startsWith('YOUR_'));
+  return Array.from(new Set(all));
+}
+
 export function getGeminiKeys() {
-  const keys = [
-    process.env.GEMINI_API_KEY_1?.trim() || '',
-    process.env.GEMINI_API_KEY_2?.trim() || '',
-    process.env.GEMINI_API_KEY_3?.trim() || ''
-  ].filter((k) => k && !k.startsWith('YOUR_'));
-  return keys.length ? keys : config.geminiKeys;
+  return getActiveGeminiKeys();
 }
 
 let keyIdx = 0;
 export function getNextGeminiKey() {
-  const keys = getGeminiKeys();
+  const keys = getActiveGeminiKeys();
   if (!keys.length) return null;
   const apiKey = keys[keyIdx % keys.length];
   keyIdx++;
@@ -71,7 +79,7 @@ export function getNextGeminiKey() {
 
 let modelProbeStatus = 'skipped';
 export async function probeGeminiModel() {
-  const keys = getGeminiKeys();
+  const keys = getActiveGeminiKeys();
   if (!keys.length) {
     modelProbeStatus = 'skipped';
     return;
@@ -1231,10 +1239,11 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const allowDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
+        const activeKeys = getActiveGeminiKeys();
 
         // مسیر جریانی (SSE Streaming)
         if (isStream) {
-          if (!getGeminiKeys().length) {
+          if (!activeKeys.length) {
             if (allowDemo) {
               const demoReply = imageBase64
                 ? `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید.`
@@ -1247,9 +1256,11 @@ export const server = http.createServer(async (req, res) => {
 
               res.writeHead(200, {
                 'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
+                'Cache-Control': 'no-cache, no-transform',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no'
               });
+              if (typeof res.flushHeaders === 'function') res.flushHeaders();
               res.write(`data: ${JSON.stringify({ chunk: demoReply })}\n\n`);
               res.write('data: [DONE]\n\n');
               res.end();
@@ -1261,98 +1272,149 @@ export const server = http.createServer(async (req, res) => {
             }
           }
 
+          let streamSuccess = false;
+
           try {
+            // تلاش اول: اتصال مستقیم به SSE Stream با مهلت ۲۵ ثانیه
             const upstreamRes = await callGeminiStreamGenerateContent({
-              payload: { contents: [{ parts }] }
+              payload: { contents: [{ parts }] },
+              timeoutMs: 25000
             });
 
-            if (!upstreamRes || !upstreamRes.ok) {
-              throw new Error('Gemini stream upstream failed');
-            }
-
-            // سهمیه به صورت اتمیک تنها پس از تایید اتصال 200 کسر می‌شود
-            aiRepo.recordAiQuery(db, { userId, courseId, now });
-            st.lastChatAt = now;
-            st.usedAiQueries = currentQueries + 1;
-            saveDB();
-
-            res.writeHead(200, {
-              'Content-Type': 'text/event-stream; charset=utf-8',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive'
-            });
-
-            const reader = upstreamRes.body.getReader();
-            const decoder = new TextDecoder();
-            let streamBuf = '';
-
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              streamBuf += decoder.decode(value, { stream: true });
-              const lines = streamBuf.split(/\r?\n/);
-              streamBuf = lines.pop() || '';
-
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed.startsWith('data:')) {
-                  const jsonStr = trimmed.slice(5).trim();
-                  if (jsonStr && jsonStr !== '[DONE]') {
-                    try {
-                      const data = JSON.parse(jsonStr);
-                      const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                      if (chunk) {
-                        res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
-                      }
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
-
-            if (streamBuf.trim().startsWith('data:')) {
-              const jsonStr = streamBuf.trim().slice(5).trim();
-              if (jsonStr && jsonStr !== '[DONE]') {
-                try {
-                  const data = JSON.parse(jsonStr);
-                  const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                  if (chunk) {
-                    res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
-                  }
-                } catch (_) {}
-              }
-            }
-
-            res.write('data: [DONE]\n\n');
-            res.end();
-            return;
-          } catch (err) {
-            console.error('Gemini ask-tutor stream error:', err.message);
-            if (allowDemo) {
+            if (upstreamRes && upstreamRes.ok) {
+              // سهمیه به صورت اتمیک تنها پس از تایید اتصال 200 کسر می‌شود
               aiRepo.recordAiQuery(db, { userId, courseId, now });
               st.lastChatAt = now;
               st.usedAiQueries = currentQueries + 1;
               saveDB();
+
               res.writeHead(200, {
                 'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
+                'Cache-Control': 'no-cache, no-transform',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no'
               });
-              res.write(`data: ${JSON.stringify({ chunk: '💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، مقادیر در شرایط استاندارد سنجیده می‌شوند.' })}\n\n`);
+              if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+              const reader = upstreamRes.body.getReader();
+              const decoder = new TextDecoder();
+              let streamBuf = '';
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                streamBuf += decoder.decode(value, { stream: true });
+                const lines = streamBuf.split(/\r?\n/);
+                streamBuf = lines.pop() || '';
+
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (trimmed.startsWith('data:')) {
+                    const jsonStr = trimmed.slice(5).trim();
+                    if (jsonStr && jsonStr !== '[DONE]') {
+                      try {
+                        const data = JSON.parse(jsonStr);
+                        const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                        if (chunk) {
+                          res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+                        }
+                      } catch (_) {}
+                    }
+                  }
+                }
+              }
+
+              if (streamBuf.trim().startsWith('data:')) {
+                const jsonStr = streamBuf.trim().slice(5).trim();
+                if (jsonStr && jsonStr !== '[DONE]') {
+                  try {
+                    const data = JSON.parse(jsonStr);
+                    const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (chunk) {
+                      res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+                    }
+                  } catch (_) {}
+                }
+              }
+
+              res.write('data: [DONE]\n\n');
+              res.end();
+              streamSuccess = true;
+              return;
+            }
+          } catch (streamErr) {
+            console.warn(`⚠️ Gemini native stream failed (${streamErr.message}). Falling back to generateContent streamer...`);
+          }
+
+          if (!streamSuccess) {
+            // بازگشت خودکار (Fallback) به generateContent و استریم ساختگی قطعه‌به‌قطعه کلمات
+            try {
+              const fullText = await callGeminiGenerateContent({
+                payload: { contents: [{ parts }] }
+              });
+
+              if (!fullText) throw new Error('Empty response from fallback generateContent');
+
+              // سهمیه به صورت اتمیک تنها پس از دریافت موفق متن کسر می‌شود
+              aiRepo.recordAiQuery(db, { userId, courseId, now });
+              st.lastChatAt = now;
+              st.usedAiQueries = currentQueries + 1;
+              saveDB();
+
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no'
+              });
+              if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+              // تقطیع هوشمند متن به بخش‌های ۳ تا ۴ کلمه‌ای
+              const words = fullText.split(/(\s+)/);
+              let chunkAcc = '';
+              let wordCount = 0;
+              for (let i = 0; i < words.length; i++) {
+                chunkAcc += words[i];
+                if (words[i].trim()) wordCount++;
+                if (wordCount >= 3 || i === words.length - 1) {
+                  res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
+                  chunkAcc = '';
+                  wordCount = 0;
+                }
+              }
               res.write('data: [DONE]\n\n');
               res.end();
               return;
+            } catch (fallbackErr) {
+              console.error('Gemini ask-tutor fallback error:', fallbackErr.message);
+              if (allowDemo) {
+                aiRepo.recordAiQuery(db, { userId, courseId, now });
+                st.lastChatAt = now;
+                st.usedAiQueries = currentQueries + 1;
+                saveDB();
+                res.writeHead(200, {
+                  'Content-Type': 'text/event-stream; charset=utf-8',
+                  'Cache-Control': 'no-cache, no-transform',
+                  'Connection': 'keep-alive',
+                  'X-Accel-Buffering': 'no'
+                });
+                if (typeof res.flushHeaders === 'function') res.flushHeaders();
+                res.write(`data: ${JSON.stringify({ chunk: '💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، مقادیر در شرایط استاندارد سنجیده می‌شوند.' })}\n\n`);
+                res.write('data: [DONE]\n\n');
+                res.end();
+                return;
+              }
+              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'خطا در برقراری ارتباط با مدل هوش مصنوعی. لطفاً دوباره تلاش کنید.' }));
+              return;
             }
-            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'خطا در برقراری ارتباط با مدل هوش مصنوعی. لطفاً دوباره تلاش کنید.' }));
-            return;
           }
         }
 
         // مسیر استاندارد غیرجریانی (JSON Response)
         let replyText = '';
 
-        if (!getGeminiKeys().length) {
+        if (!activeKeys.length) {
           if (allowDemo) {
             if (imageBase64) {
               replyText = `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید.`;
