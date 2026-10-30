@@ -812,6 +812,51 @@ async function streamTutorAnswer(payload, onChunk) {
     'X-Telegram-Init-Data': getTelegramInitData()
   };
 
+  const tokenQueue = [];
+  const tokenState = { pending: '' };
+  let displayedText = '';
+  let isDone = false;
+  const tickMs = (typeof window !== 'undefined' && window.__FAST_TEST_STREAM) ? 0 : 30;
+
+  const drainPromise = new Promise((resolve) => {
+    function tick() {
+      if (tokenQueue.length > 0) {
+        const tok = tokenQueue.shift();
+        displayedText += tok;
+        const isFinished = isDone && tokenQueue.length === 0;
+        if (typeof onChunk === 'function') {
+          onChunk(isFinished ? displayedText : (displayedText + ' ▍'), isFinished);
+        }
+      }
+
+      if (isDone && tokenQueue.length === 0) {
+        if (typeof onChunk === 'function' && displayedText) {
+          onChunk(displayedText, true);
+        }
+        resolve();
+        return;
+      }
+
+      if (tickMs === 0) {
+        while (tokenQueue.length > 0) {
+          const tok = tokenQueue.shift();
+          displayedText += tok;
+        }
+        if (isDone) {
+          if (typeof onChunk === 'function' && displayedText) {
+            onChunk(displayedText, true);
+          }
+          resolve();
+          return;
+        }
+        setTimeout(tick, 0);
+      } else {
+        setTimeout(tick, tickMs);
+      }
+    }
+    tick();
+  });
+
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -835,6 +880,16 @@ async function streamTutorAnswer(payload, onChunk) {
           quotaExceeded: Boolean(data?.quotaExceeded)
         };
       }
+      if (data?.reply) {
+        tokenizeIntoTypewriterQueue(data.reply, tokenState, tokenQueue);
+        isDone = true;
+        if (tokenState.pending) {
+          tokenQueue.push(tokenState.pending);
+          tokenState.pending = '';
+        }
+        await drainPromise;
+        return { ...data, reply: displayedText };
+      }
       return data;
     }
 
@@ -842,47 +897,6 @@ async function streamTutorAnswer(payload, onChunk) {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let isDone = false;
-      const tokenQueue = [];
-      const tokenState = { pending: '' };
-      let displayedText = '';
-
-      const tickMs = (typeof window !== 'undefined' && window.__FAST_TEST_STREAM) ? 0 : 25;
-
-      const drainPromise = new Promise((resolve) => {
-        function tick() {
-          if (tokenQueue.length > 0) {
-            const tok = tokenQueue.shift();
-            displayedText += tok;
-            if (typeof onChunk === 'function') {
-              onChunk(displayedText, tok);
-            }
-          }
-
-          if (isDone && tokenQueue.length === 0) {
-            resolve();
-            return;
-          }
-
-          if (tickMs === 0) {
-            while (tokenQueue.length > 0) {
-              const tok = tokenQueue.shift();
-              displayedText += tok;
-              if (typeof onChunk === 'function') {
-                onChunk(displayedText, tok);
-              }
-            }
-            if (isDone) {
-              resolve();
-              return;
-            }
-            setTimeout(tick, 0);
-          } else {
-            setTimeout(tick, tickMs);
-          }
-        }
-        tick();
-      });
 
       while (true) {
         const { done, value } = await reader.read();
@@ -921,7 +935,14 @@ async function streamTutorAnswer(payload, onChunk) {
     }
 
     const text = await res.text();
-    return { ok: true, reply: text };
+    tokenizeIntoTypewriterQueue(text, tokenState, tokenQueue);
+    isDone = true;
+    if (tokenState.pending) {
+      tokenQueue.push(tokenState.pending);
+      tokenState.pending = '';
+    }
+    await drainPromise;
+    return { ok: true, reply: displayedText };
   } catch (err) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {

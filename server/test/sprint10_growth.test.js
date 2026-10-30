@@ -28,7 +28,8 @@ const {
   db,
   growthRepo,
   recordCourseSale,
-  callGeminiGenerateContent
+  callGeminiGenerateContent,
+  synthesizeGroundedTutorAnswer
 } = await import('../server.js');
 
 const { config } = await import('../config.js');
@@ -54,7 +55,7 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.equal(config.geminiModel, 'gemini-3.8-flash');
   });
 
-  it('maxOutputTokens defaults to 4096 so reasoning tokens never truncate visible formulas', async () => {
+  it('maxOutputTokens defaults to 900 for fast latency without triggering timeouts', async () => {
     const originalFetch = global.fetch;
     let sentGenConfig = null;
 
@@ -77,7 +78,7 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
         payload: { contents: [{ parts: [{ text: 'شعاع بحرانی چیست؟' }] }] },
         timeoutMs: 1000
       });
-      assert.equal(sentGenConfig.maxOutputTokens, 4096);
+      assert.equal(sentGenConfig.maxOutputTokens, 900);
       assert.equal(sentGenConfig.temperature, 0.2);
       assert.equal(sentGenConfig.topP, 0.95);
       assert.equal(sentGenConfig.thinkingConfig, undefined);
@@ -261,6 +262,89 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     } finally {
       global.fetch = originalFetch;
     }
+  });
+
+  it('POST /api/ask-tutor streams course-grounded fallback with zero quota deduction when upstream is completely unavailable', async () => {
+    const studentId = 777555;
+    const studentAuth = mintInitData({ id: studentId, first_name: 'OutageStudent' }, testToken);
+    const originalFetch = global.fetch;
+
+    // Both streamGenerateContent and generateContent fail (simulating complete Google 503 outage)
+    global.fetch = async (url, opts) => {
+      if (String(url).includes('streamGenerateContent') || String(url).includes('generateContent')) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: async () => ({ error: { message: 'The model is overloaded. Please try again later.' } })
+        };
+      }
+      return originalFetch(url, opts);
+    };
+
+    try {
+      const res = await fetch(`${baseUrl}/api/ask-tutor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'X-Telegram-Init-Data': studentAuth
+        },
+        body: JSON.stringify({
+          courseId: 'sample_course',
+          contextText: 'صفحه ۳: محاسبه کار در فرآیند هم‌فشار با رابطه $W = P \\Delta V$ انجام می‌شود.',
+          question: 'لطفاً یک مثال عددی از محاسبه کار با فرمول بزنید.',
+          stream: true
+        })
+      });
+
+      assert.equal(res.status, 200);
+      assert.ok(res.headers.get('content-type')?.includes('text/event-stream'));
+      assert.equal(res.headers.get('x-accel-buffering'), 'no');
+
+      const bodyText = await res.text();
+      assert.ok(bodyText.includes(': stream-open'));
+      assert.ok(bodyText.includes('data: {"chunk":'));
+      assert.ok(bodyText.includes('[DONE]'));
+
+      // Reconstruct streamed chunks
+      const chunks = [];
+      for (const line of bodyText.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data:') && !trimmed.includes('[DONE]')) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(5));
+            if (parsed.chunk) chunks.push(parsed.chunk);
+          } catch (_) {}
+        }
+      }
+      const reconstructed = chunks.join('');
+      assert.ok(reconstructed.includes('$W = P \\Delta V$'));
+      assert.ok(reconstructed.includes('توضیح ساده و خودمانی'));
+      assert.ok(reconstructed.includes('رابطه و کاربرد امتحانی'));
+      assert.ok(reconstructed.includes('دام تستی و نکته کلیدی استاد'));
+
+      // ZERO quota deduction on upstream outage
+      const { aiRepo } = await import('../server.js');
+      const usage = aiRepo.getAiUsage(db, String(studentId), 'sample_course');
+      assert.equal(usage.queriesCount, 0, 'Quota must NOT be deducted when upstream fails and smart fallback is served');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('synthesizeGroundedTutorAnswer formats structured 3-part study guide with intact formulas', () => {
+    const res = synthesizeGroundedTutorAnswer({
+      question: 'دام تستی این فرمول چیست؟',
+      contextText: 'ترمودینامیک: کار فرآیند انبساط $W = \\int P dV$ و گرما $Q = m c \\Delta T$ است.'
+    });
+
+    assert.ok(res.includes('💡 **تحلیل مستند به جزوه استاد:**'));
+    assert.ok(res.includes('**۱. توضیح ساده و خودمانی نکته:**'));
+    assert.ok(res.includes('**۲. رابطه و کاربرد امتحانی:**'));
+    assert.ok(res.includes('**۳. دام تستی و نکته کلیدی استاد:**'));
+    assert.ok(res.includes('$W = \\int P dV$'));
+    assert.ok(res.includes('$Q = m c \\Delta T$'));
   });
 });
 

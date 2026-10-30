@@ -44,7 +44,7 @@ export async function callGeminiRest({ contents, generationConfig, model = confi
 
   const effectiveGenConfig = {
     temperature: 0.2,
-    maxOutputTokens: 4096,
+    maxOutputTokens: 900,
     topP: 0.95,
     ...(generationConfig || {})
   };

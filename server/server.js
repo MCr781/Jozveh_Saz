@@ -115,19 +115,21 @@ export async function callGeminiGenerateContent({
   apiKey = getNextGeminiKey(),
   model = config.geminiModel || 'gemini-3.8-flash',
   payload = {},
-  timeoutMs = 75000
+  timeoutMs = 75000,
+  maxAttempts = 3,
+  retryDelayMs
 } = {}) {
   if (!apiKey) return null;
 
   const generationConfig = {
     temperature: 0.2,
-    maxOutputTokens: 4096,
+    maxOutputTokens: 900,
     topP: 0.95,
     ...(payload?.generationConfig || {})
   };
 
-  const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 75000;
-  const retryDelayMs = process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200;
+  const effectiveTimeoutMs = process.env.GEMINI_TIMEOUT_MS !== undefined ? Number(process.env.GEMINI_TIMEOUT_MS) : (timeoutMs || 75000);
+  const effectiveRetryDelay = retryDelayMs !== undefined ? retryDelayMs : (process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200);
 
   async function executeRequest(targetModel, currentKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
@@ -173,7 +175,6 @@ export async function callGeminiGenerateContent({
 
   let activeModel = model;
   let currentKey = apiKey;
-  const maxAttempts = 3;
   let lastErr = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -197,9 +198,9 @@ export async function callGeminiGenerateContent({
         err.message.includes('UNAVAILABLE')
       ));
       if (isHighDemand && attempt < maxAttempts - 1) {
-        console.warn(`⚠️ Gemini 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${retryDelayMs}ms...`);
-        if (retryDelayMs > 0) {
-          await new Promise((r) => setTimeout(r, retryDelayMs));
+        console.warn(`⚠️ Gemini 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
+        if (effectiveRetryDelay > 0) {
+          await new Promise((r) => setTimeout(r, effectiveRetryDelay));
         }
         currentKey = getNextGeminiKey() || currentKey;
         continue;
@@ -215,19 +216,21 @@ export async function callGeminiStreamGenerateContent({
   apiKey = getNextGeminiKey(),
   model = config.geminiModel || 'gemini-3.8-flash',
   payload = {},
-  timeoutMs = 75000
+  timeoutMs = 75000,
+  maxAttempts = 3,
+  retryDelayMs
 } = {}) {
   if (!apiKey) return null;
 
   const generationConfig = {
     temperature: 0.2,
-    maxOutputTokens: 4096,
+    maxOutputTokens: 900,
     topP: 0.95,
     ...(payload?.generationConfig || {})
   };
 
-  const effectiveTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS) || timeoutMs || 75000;
-  const retryDelayMs = process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200;
+  const effectiveTimeoutMs = process.env.GEMINI_TIMEOUT_MS !== undefined ? Number(process.env.GEMINI_TIMEOUT_MS) : (timeoutMs || 75000);
+  const effectiveRetryDelay = retryDelayMs !== undefined ? retryDelayMs : (process.env.GEMINI_RETRY_DELAY_MS !== undefined ? Number(process.env.GEMINI_RETRY_DELAY_MS) : 1200);
 
   async function executeStream(targetModel, currentKey) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:streamGenerateContent?alt=sse`;
@@ -272,7 +275,6 @@ export async function callGeminiStreamGenerateContent({
 
   let activeModel = model;
   let currentKey = apiKey;
-  const maxAttempts = 3;
   let lastErr = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -296,9 +298,9 @@ export async function callGeminiStreamGenerateContent({
         err.message.includes('UNAVAILABLE')
       ));
       if (isHighDemand && attempt < maxAttempts - 1) {
-        console.warn(`⚠️ Gemini stream 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${retryDelayMs}ms...`);
-        if (retryDelayMs > 0) {
-          await new Promise((r) => setTimeout(r, retryDelayMs));
+        console.warn(`⚠️ Gemini stream 503/429 high demand spike (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
+        if (effectiveRetryDelay > 0) {
+          await new Promise((r) => setTimeout(r, effectiveRetryDelay));
         }
         currentKey = getNextGeminiKey() || currentKey;
         continue;
@@ -308,6 +310,76 @@ export async function callGeminiStreamGenerateContent({
   }
 
   throw lastErr || new Error('Stream request failed');
+}
+
+export function synthesizeGroundedTutorAnswer({ question = '', contextText = '' } = {}) {
+  const cleanContext = String(contextText || '').trim();
+  const cleanQ = String(question || '').trim();
+
+  // استخراج فرمول‌های ریاضی KaTeX ($...$ یا $$...$$)
+  const formulas = [];
+  const formulaRegex = /\$\$([\s\S]+?)\$\$|\$([^\$]+?)\$/g;
+  let match;
+  while ((match = formulaRegex.exec(cleanContext)) !== null) {
+    const f = match[0].trim();
+    if (!formulas.includes(f)) formulas.push(f);
+  }
+
+  // استخراج عنوان و سرنخ‌های کلیدی از متن کارت
+  const firstLine = cleanContext
+    .replace(/^صفحه\s*[\d\u06F0-\u06F9\u0660-\u0669]+\s*:\s*/i, '')
+    .split(/\r?\n/)[0] || '';
+
+  let topic = firstLine.split(/[:：$]/)[0].trim();
+  if (!topic || topic.length < 3) topic = firstLine.split('$')[0].trim() || 'این مبحث امتحانی';
+  if (topic.length > 60) topic = topic.slice(0, 60).trim();
+
+  // تشخیص هدف پرسش دانشجو (ساده، مثال عددی، یا دام تستی)
+  const qLower = cleanQ.toLowerCase();
+  const isExample = qLower.includes('مثال') || qLower.includes('عددی') || qLower.includes('محاسبه') || qLower.includes('حل');
+  const isTrap = qLower.includes('دام') || qLower.includes('تست') || qLower.includes('انحراف') || qLower.includes('اشتباه') || qLower.includes('خطا');
+
+  let part1 = '';
+  let part2 = '';
+  let part3 = '';
+
+  if (isExample) {
+    part1 = `برای حل مسائل مربوط به **${topic}**، ابتدا باید داده‌های معلوم مسئله را تفکیک کرده و مجهول خواسته شده را در فرمول اصلی مشخص کنیم.`;
+    if (formulas.length > 0) {
+      part2 = `رابطه محاسباتی استاد: ${formulas.join(' و ')}\n` +
+        `روش حل گام‌به‌گام: با جایگذاری مقادیر استاندارد در رابطه بالا، مجهول مورد نظر به دست می‌آید.`;
+    } else {
+      part2 = `روش محاسباتی: مقادیر داده‌شده را در شرایط تعادل سیستم قرار داده و متغیر هدف را استخراج کنید.`;
+    }
+    part3 = `نکته امتحانی مهم: در مسائل عددی، حتماً یکسان بودن واحدها در سیستم SI (مخصوصاً فشار برحسب پاسکال و حجم برحسب مترمکعب) را کنترل کنید تا از نمره شما کسر نشود.`;
+  } else if (isTrap) {
+    part1 = `در مبحث **${topic}**، معمولاً طراحان از تغییر شرایط مرزی یا تعریف غیرمستقیم متغیرها برای تست دقت دانشجو استفاده می‌کنند.`;
+    if (formulas.length > 0) {
+      part2 = `روابط دارای پیش‌شرط: ${formulas.join(' و ')}\n` +
+        `این فرمول تنها در فرآیندهای معین با شرایط مشخص صدق می‌کند و نباید در حالت عمومی تعمیم داده شود.`;
+    } else {
+      part2 = `روابط کلیدی تنها در فرض‌های اولیه مشخص‌شده در جزوه استاد دارای اعتبار هستند.`;
+    }
+    part3 = `بزرگ‌ترین دام تستی: عدم توجه به علائم جبری (مثبت و منفی) متغیرها و فرضیات اولیه مسئله است که نمره تشریحی را صفر می‌کند.`;
+  } else {
+    part1 = `مفهوم بنیادین **${topic}** به بیان ساده این است که تغییرات در متغیرهای سیستم، مستقیماً طبق قوانین این بخش، نتیجه نهایی را تعیین می‌کند.`;
+    if (formulas.length > 0) {
+      part2 = `فرمول کلیدی استاد: ${formulas.join(' و ')}\n` +
+        `این رابطه نحوه تغییرات متغیر اصلی را نسبت به سایر پارامترها در آزمون توصیف می‌کند.`;
+    } else {
+      part2 = `نکته کلیدی جزوه: بررسی ارتباط علت و معلولی میان متغیرهای معرفی‌شده، کلید پاسخ به سوالات این مبحث است.`;
+    }
+    part3 = `دام تستی و نکته کلیدی استاد: همیشه قبل از نگارش فرمول، تعاریف متغیرها و فرضیات سیستم را یادداشت کنید تا در تله‌های تستی نیفتید.`;
+  }
+
+  const sections = [
+    `💡 **تحلیل مستند به جزوه استاد:**`,
+    `**۱. توضیح ساده و خودمانی نکته:**\n${part1}`,
+    `**۲. رابطه و کاربرد امتحانی:**\n${part2}`,
+    `**۳. دام تستی و نکته کلیدی استاد:**\n${part3}`
+  ];
+
+  return sections.join('\n\n');
 }
 
 export async function callGeminiRestServer({ contents, generationConfig, model = config.geminiModel || 'gemini-3.8-flash' }) {
@@ -1243,31 +1315,53 @@ export const server = http.createServer(async (req, res) => {
 
         // مسیر جریانی (SSE Streaming)
         if (isStream) {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+          });
+          if (typeof res.flushHeaders === 'function') res.flushHeaders();
+          res.write(': stream-open\n\n');
+
+          let quotaDeducted = false;
+          const deductQuotaOnce = () => {
+            if (quotaDeducted) return;
+            quotaDeducted = true;
+            aiRepo.recordAiQuery(db, { userId, courseId, now });
+            st.lastChatAt = now;
+            st.usedAiQueries = currentQueries + 1;
+            saveDB();
+          };
+
           if (!activeKeys.length) {
             if (allowDemo) {
+              deductQuotaOnce();
               const demoReply = imageBase64
                 ? `💡 [پاسخ سرور لوکال]: تصویر سوال دریافت شد. بر اساس جزوه استاد، ابتدا متغیرهای معلوم را شناسایی کرده و در فرمول‌های پایه جایگذاری کنید.`
                 : `💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، در رابطه با «${cleanQuestion}» توجه کنید که واحدها حتماً در سیستم SI قرار گیرند.`;
 
-              aiRepo.recordAiQuery(db, { userId, courseId, now });
-              st.lastChatAt = now;
-              st.usedAiQueries = currentQueries + 1;
-              saveDB();
-
-              res.writeHead(200, {
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no'
-              });
-              if (typeof res.flushHeaders === 'function') res.flushHeaders();
               res.write(`data: ${JSON.stringify({ chunk: demoReply })}\n\n`);
               res.write('data: [DONE]\n\n');
               res.end();
               return;
             } else {
-              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'سرویس هوش مصنوعی در حال حاضر پیکربندی نشده است.' }));
+              // Smart grounded fallback without deducting quota
+              const answerText = synthesizeGroundedTutorAnswer({ question: cleanQuestion, contextText: cleanContext });
+              const words = answerText.split(/(\s+)/);
+              let chunkAcc = '';
+              let wordCount = 0;
+              for (let i = 0; i < words.length; i++) {
+                chunkAcc += words[i];
+                if (words[i].trim()) wordCount++;
+                if (wordCount >= 2 || i === words.length - 1) {
+                  res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
+                  chunkAcc = '';
+                  wordCount = 0;
+                }
+              }
+              res.write('data: [DONE]\n\n');
+              res.end();
               return;
             }
           }
@@ -1275,30 +1369,19 @@ export const server = http.createServer(async (req, res) => {
           let streamSuccess = false;
 
           try {
-            // تلاش اول: اتصال مستقیم به SSE Stream با مهلت ۲۵ ثانیه
+            // تلاش اول: اتصال مستقیم به SSE Stream با مهلت ۱۲ ثانیه و حداکثر ۱ بار تلاش مجدد (۴۰۰ میلی‌ثانیه)
             const upstreamRes = await callGeminiStreamGenerateContent({
               payload: { contents: [{ parts }] },
-              timeoutMs: 25000
+              timeoutMs: 12000,
+              maxAttempts: 2,
+              retryDelayMs: 400
             });
 
             if (upstreamRes && upstreamRes.ok) {
-              // سهمیه به صورت اتمیک تنها پس از تایید اتصال 200 کسر می‌شود
-              aiRepo.recordAiQuery(db, { userId, courseId, now });
-              st.lastChatAt = now;
-              st.usedAiQueries = currentQueries + 1;
-              saveDB();
-
-              res.writeHead(200, {
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no'
-              });
-              if (typeof res.flushHeaders === 'function') res.flushHeaders();
-
               const reader = upstreamRes.body.getReader();
               const decoder = new TextDecoder();
               let streamBuf = '';
+              let receivedAnyCandidate = false;
 
               while (true) {
                 const { done, value } = await reader.read();
@@ -1316,6 +1399,10 @@ export const server = http.createServer(async (req, res) => {
                         const data = JSON.parse(jsonStr);
                         const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
                         if (chunk) {
+                          if (!receivedAnyCandidate) {
+                            receivedAnyCandidate = true;
+                            deductQuotaOnce();
+                          }
                           res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
                         }
                       } catch (_) {}
@@ -1331,52 +1418,49 @@ export const server = http.createServer(async (req, res) => {
                     const data = JSON.parse(jsonStr);
                     const chunk = data?.candidates?.[0]?.content?.parts?.[0]?.text;
                     if (chunk) {
+                      if (!receivedAnyCandidate) {
+                        receivedAnyCandidate = true;
+                        deductQuotaOnce();
+                      }
                       res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
                     }
                   } catch (_) {}
                 }
               }
 
-              res.write('data: [DONE]\n\n');
-              res.end();
-              streamSuccess = true;
-              return;
+              if (receivedAnyCandidate) {
+                res.write('data: [DONE]\n\n');
+                res.end();
+                streamSuccess = true;
+                return;
+              }
             }
           } catch (streamErr) {
             console.warn(`⚠️ Gemini native stream failed (${streamErr.message}). Falling back to generateContent streamer...`);
           }
 
           if (!streamSuccess) {
-            // بازگشت خودکار (Fallback) به generateContent و استریم ساختگی قطعه‌به‌قطعه کلمات
+            // تلاش دوم: بازگشت خودکار (Fallback) به generateContent با مهلت ۱۸ ثانیه و حداکثر ۱ بار تلاش مجدد
             try {
               const fullText = await callGeminiGenerateContent({
-                payload: { contents: [{ parts }] }
+                payload: { contents: [{ parts }] },
+                timeoutMs: 18000,
+                maxAttempts: 2,
+                retryDelayMs: 400
               });
 
               if (!fullText) throw new Error('Empty response from fallback generateContent');
 
-              // سهمیه به صورت اتمیک تنها پس از دریافت موفق متن کسر می‌شود
-              aiRepo.recordAiQuery(db, { userId, courseId, now });
-              st.lastChatAt = now;
-              st.usedAiQueries = currentQueries + 1;
-              saveDB();
+              deductQuotaOnce();
 
-              res.writeHead(200, {
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no'
-              });
-              if (typeof res.flushHeaders === 'function') res.flushHeaders();
-
-              // تقطیع هوشمند متن به بخش‌های ۳ تا ۴ کلمه‌ای
+              // تقطیع هوشمند متن به بخش‌های ۲ تا ۳ کلمه‌ای
               const words = fullText.split(/(\s+)/);
               let chunkAcc = '';
               let wordCount = 0;
               for (let i = 0; i < words.length; i++) {
                 chunkAcc += words[i];
                 if (words[i].trim()) wordCount++;
-                if (wordCount >= 3 || i === words.length - 1) {
+                if (wordCount >= 2 || i === words.length - 1) {
                   res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
                   chunkAcc = '';
                   wordCount = 0;
@@ -1386,26 +1470,23 @@ export const server = http.createServer(async (req, res) => {
               res.end();
               return;
             } catch (fallbackErr) {
-              console.error('Gemini ask-tutor fallback error:', fallbackErr.message);
-              if (allowDemo) {
-                aiRepo.recordAiQuery(db, { userId, courseId, now });
-                st.lastChatAt = now;
-                st.usedAiQueries = currentQueries + 1;
-                saveDB();
-                res.writeHead(200, {
-                  'Content-Type': 'text/event-stream; charset=utf-8',
-                  'Cache-Control': 'no-cache, no-transform',
-                  'Connection': 'keep-alive',
-                  'X-Accel-Buffering': 'no'
-                });
-                if (typeof res.flushHeaders === 'function') res.flushHeaders();
-                res.write(`data: ${JSON.stringify({ chunk: '💡 [پاسخ سرور لوکال]: بر اساس جزوه استاد، مقادیر در شرایط استاندارد سنجیده می‌شوند.' })}\n\n`);
-                res.write('data: [DONE]\n\n');
-                res.end();
-                return;
+              console.warn(`⚠️ Gemini generateContent fallback failed (${fallbackErr.message}). Activating course-grounded smart fallback...`);
+              // تلاش سوم: دستیار مستند به جزوه با هزینه سهمیه صفر برای دانشجو در زمان قطعی گوگل
+              const answerText = synthesizeGroundedTutorAnswer({ question: cleanQuestion, contextText: cleanContext });
+              const words = answerText.split(/(\s+)/);
+              let chunkAcc = '';
+              let wordCount = 0;
+              for (let i = 0; i < words.length; i++) {
+                chunkAcc += words[i];
+                if (words[i].trim()) wordCount++;
+                if (wordCount >= 2 || i === words.length - 1) {
+                  res.write(`data: ${JSON.stringify({ chunk: chunkAcc })}\n\n`);
+                  chunkAcc = '';
+                  wordCount = 0;
+                }
               }
-              res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ ok: false, code: 'AI_UPSTREAM', message: 'خطا در برقراری ارتباط با مدل هوش مصنوعی. لطفاً دوباره تلاش کنید.' }));
+              res.write('data: [DONE]\n\n');
+              res.end();
               return;
             }
           }
@@ -2550,6 +2631,8 @@ export const server = http.createServer(async (req, res) => {
   // فونت وزیرمتن و فایل‌های KaTeX برای یک هفته به صورت immutable کش شوند.
   if (ext === '.woff2' || baseName.startsWith('katex.min.')) {
     headers['Cache-Control'] = IMMUTABLE_CACHE_CONTROL;
+  } else if (ext === '.html' || ext === '.js' || ext === '.css') {
+    headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
   }
 
   res.writeHead(200, headers);
