@@ -995,3 +995,87 @@ html, body {
 .catalog-card-price.unlocked-pro {
   color: #34d399;
 }
+
+/* Wave 11-B: High-Conversion Blurred Formula Teaser Paywall & Academic Metadata */
+.locked-card-teaser {
+  position: relative;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%);
+}
+
+.locked-blurred-formula-wrapper {
+  position: relative;
+  margin: 12px 0 8px 0;
+  padding: 12px 10px;
+  background: rgba(15, 23, 42, 0.65);
+  border-radius: 10px;
+  border: 1px dashed rgba(245, 158, 11, 0.35);
+  overflow: hidden;
+  text-align: center;
+}
+
+.blurred-math-preview {
+  filter: blur(5px);
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  opacity: 0.55;
+  transition: filter 0.2s ease;
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
+}
+
+.unlock-teaser-badge {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #0f172a;
+  border: none;
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(245, 158, 11, 0.35);
+  white-space: nowrap;
+  z-index: 2;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unlock-teaser-badge:active {
+  transform: translate(-50%, -48%) scale(0.97);
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+}
+
+.catalog-card-prof {
+  font-size: 0.74rem;
+  color: #38bdf8;
+  margin-top: 3px;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+
+.catalog-card-exam-weight {
+  display: inline-block;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  margin-bottom: 6px;
+}
+
+#dormOfflineBanner {
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  color: #38bdf8;
+  text-align: center;
+  padding: 7px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}

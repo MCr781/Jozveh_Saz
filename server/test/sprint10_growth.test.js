@@ -549,7 +549,7 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     // Locked flashcard answers must NOT be stripped for admin
     const lockedFc = (adminCourseData.course.flashcards || []).find((f) => f.is_locked);
     if (lockedFc) {
-      assert.notStrictEqual(lockedFc.back, '🔒 محتوای قفل‌شده (مخصوص نسخه کامل)');
+      assert.strictEqual(lockedFc.back.includes('🔒'), false);
     }
 
     const resRegularCourse = await fetch(`${baseUrl}/api/course?id=sample_course`, {
@@ -561,7 +561,8 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     assert.ok(regularCourseData.remainingAiQuota <= 3);
     const regLockedFc = (regularCourseData.course.flashcards || []).find((f) => f.is_locked);
     if (regLockedFc) {
-      assert.strictEqual(regLockedFc.back, '🔒 محتوای قفل‌شده (مخصوص نسخه کامل)');
+      assert.ok(regLockedFc.back.includes('🔒'));
+      assert.strictEqual(regLockedFc.back, '🔒 این فرمول، نکته امتحانی استاد و حل تشریحی در نسخه کامل باز می‌شود.');
     }
 
     // 3. POST /api/ask-tutor: admin bypasses quota limit
@@ -956,5 +957,95 @@ describe('Story S10-4: Token-Bucket Channel Broadcast Worker & 403/429 Resilienc
     });
 
     assert.equal(growthRepo.isUserBotBlocked(db, blockedUserId), true);
+  });
+});
+
+describe('Wave 11-B: Professor/University Academic Metadata & Blurred Formula Teaser Paywall', () => {
+  it('GET /api/courses exposes professor, university, semester, examWeight and item counts', async () => {
+    const res = await fetch(`${baseUrl}/api/courses`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.ok, true);
+    assert.ok(Array.isArray(data.courses) && data.courses.length >= 4);
+
+    const sample = data.courses.find((c) => c.slug === 'sample_course' || c.id === 'ut_metal_thermo_01');
+    assert.ok(sample, 'sample_course must be present in catalog');
+    assert.ok(sample.professor && sample.professor.includes('دکتر'));
+    assert.equal(sample.university, 'دانشگاه تهران');
+    assert.equal(sample.semester, 'نیمسال اول ۱۴۰۵');
+    assert.ok(sample.examWeight && sample.examWeight.includes('پوشش'));
+    assert.ok(sample.formulasCount >= 4);
+    assert.ok(sample.flashcardsCount >= 4);
+    assert.ok(sample.quizCount >= 4);
+  });
+
+  it('stripLockedContentForFreeUser leaves 2 preview items intact and redacts locked items', async () => {
+    const { stripLockedContentForFreeUser } = await import('../server.js');
+    const mockCourse = {
+      id: 'test_course_meta',
+      title: 'درس تستی',
+      summary_cheat_sheet: [
+        { id: 'cs_1', topic: 'مبحث ۱', formula_latex: 'E=mc^2', key_points: ['نکته ۱'], source_page: 5 },
+        { id: 'cs_2', topic: 'مبحث ۲', formula_latex: 'F=ma', key_points: ['نکته ۲'], source_page: 10 },
+        { id: 'cs_3', topic: 'مبحث ۳ کلیدی', formula_latex: 'PV=nRT', key_points: ['نکته ۳ مهم'], source_page: 15 }
+      ],
+      flashcards: [
+        { id: 'fc_1', front: 'سوال ۱', back: 'پاسخ ۱', source_page: 5 },
+        { id: 'fc_2', front: 'سوال ۲', back: 'پاسخ ۲', source_page: 10 },
+        { id: 'fc_3', front: 'سوال ۳ پرتکرار', back: 'پاسخ ۳ تحلیلی', source_page: 15 }
+      ],
+      exam_questions: [
+        { id: 'q_1', question_stem: 'تست ۱', options: ['الف', 'ب', 'ج', 'د'], explanation: 'حل ۱', source_page: 5 },
+        { id: 'q_2', question_stem: 'تست ۲', options: ['الف', 'ب', 'ج', 'د'], explanation: 'حل ۲', source_page: 10 },
+        { id: 'q_3', question_stem: 'تست ۳ پایانی', options: ['الف', 'ب', 'ج', 'د'], explanation: 'حل ۳', source_page: 15 }
+      ]
+    };
+
+    const stripped = stripLockedContentForFreeUser(mockCourse);
+
+    // First 2 items remain unredacted
+    assert.equal(stripped.summary_cheat_sheet[0].formula_latex, 'E=mc^2');
+    assert.equal(stripped.summary_cheat_sheet[1].formula_latex, 'F=ma');
+    assert.equal(stripped.flashcards[0].back, 'پاسخ ۱');
+    assert.equal(stripped.flashcards[1].back, 'پاسخ ۲');
+    assert.equal(stripped.exam_questions[0].explanation, 'حل ۱');
+    assert.equal(stripped.exam_questions[1].explanation, 'حل ۲');
+
+    // 3rd item is locked & redacted
+    assert.equal(stripped.summary_cheat_sheet[2].is_locked, true);
+    assert.equal(stripped.summary_cheat_sheet[2].topic, 'مبحث ۳ کلیدی');
+    assert.equal(stripped.summary_cheat_sheet[2].source_page, 15);
+    assert.equal(stripped.summary_cheat_sheet[2].formula_latex, '\\text{Locked Pro Formula}');
+    assert.ok(stripped.summary_cheat_sheet[2].tip.includes('🔒'));
+
+    assert.equal(stripped.flashcards[2].is_locked, true);
+    assert.equal(stripped.flashcards[2].front, 'سوال ۳ پرتکرار');
+    assert.equal(stripped.flashcards[2].source_page, 15);
+    assert.ok(stripped.flashcards[2].back.includes('🔒'));
+
+    assert.equal(stripped.exam_questions[2].is_locked, true);
+    assert.equal(stripped.exam_questions[2].question_stem, 'تست ۳ پایانی');
+    assert.equal(stripped.exam_questions[2].source_page, 15);
+    assert.ok(stripped.exam_questions[2].explanation.includes('🔒'));
+  });
+
+  it('GET /api/course?id=eng_math_01 serves teaser paywall preview for anonymous/free student', async () => {
+    const res = await fetch(`${baseUrl}/api/course?id=eng_math_01`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.isProUnlocked, false);
+
+    const course = data.course;
+    assert.equal(course.id, 'eng_math_01');
+    assert.ok(course.summary_cheat_sheet.length > 2);
+
+    // Free items intact
+    assert.notEqual(course.summary_cheat_sheet[0].formula_latex, '\\text{Locked Pro Formula}');
+    // Locked items redacted
+    const lockedCs = course.summary_cheat_sheet[2];
+    assert.equal(lockedCs.is_locked, true);
+    assert.equal(lockedCs.formula_latex, '\\text{Locked Pro Formula}');
+    assert.ok(lockedCs.source_page > 0);
   });
 });

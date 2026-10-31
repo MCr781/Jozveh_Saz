@@ -227,14 +227,45 @@ async function loadCourseData(courseSlug) {
       AppState.course = payload.course;
       AppState.isProUnlocked = Boolean(payload.isProUnlocked);
       AppState.aiRemainingFree = payload.remainingAiQuota !== undefined ? payload.remainingAiQuota : 3;
+
+      // ذخیره در حافظه پایدار آفلاین خوابگاه
+      try {
+        localStorage.setItem(`jozveh_cache_course_${courseSlug}`, JSON.stringify(payload));
+      } catch (_) {}
+      AppState.isOfflineDormMode = false;
+      const dormBanner = document.getElementById('dormOfflineBanner');
+      if (dormBanner) dormBanner.style.display = 'none';
     } else {
       throw new Error(payload?.message || 'API course load failed');
     }
   } catch (_) {
-    // ۲. Fallback مخصوص تست آفلاین
-    const fallback = AppState.catalog.find((c) => c.slug === courseSlug || c.id === courseSlug);
-    if (fallback) {
-      AppState.course = fallback;
+    // ۲. بازیابی خودکار از کش آفلاین خوابگاه (Dorm Offline Survival)
+    let restoredFromCache = false;
+    try {
+      const cachedRaw = localStorage.getItem(`jozveh_cache_course_${courseSlug}`);
+      if (cachedRaw) {
+        const cachedPayload = JSON.parse(cachedRaw);
+        if (cachedPayload && cachedPayload.course) {
+          AppState.course = cachedPayload.course;
+          AppState.isProUnlocked = Boolean(cachedPayload.isProUnlocked);
+          AppState.aiRemainingFree = cachedPayload.remainingAiQuota !== undefined ? cachedPayload.remainingAiQuota : 0;
+          restoredFromCache = true;
+        }
+      }
+    } catch (_) {}
+
+    if (!restoredFromCache) {
+      const fallback = AppState.catalog.find((c) => c.slug === courseSlug || c.id === courseSlug);
+      if (fallback) {
+        AppState.course = fallback;
+        restoredFromCache = true;
+      }
+    }
+
+    if (restoredFromCache) {
+      AppState.isOfflineDormMode = true;
+      const dormBanner = document.getElementById('dormOfflineBanner');
+      if (dormBanner) dormBanner.style.display = 'block';
     }
   }
 
@@ -308,8 +339,24 @@ async function fetchCatalog() {
     const data = await api('/api/courses');
     if (data && data.ok && Array.isArray(data.courses) && data.courses.length > 0) {
       AppState.catalog = data.courses;
+      try {
+        localStorage.setItem('jozveh_cache_courses', JSON.stringify(data.courses));
+      } catch (_) {}
       renderCatalogCourses();
       return;
+    }
+  } catch (_) {}
+
+  // Fallback از حافظه محلی گوشی (Dorm Cache)
+  try {
+    const cachedCatalogStr = localStorage.getItem('jozveh_cache_courses');
+    if (cachedCatalogStr) {
+      const cached = JSON.parse(cachedCatalogStr);
+      if (Array.isArray(cached) && cached.length > 0) {
+        AppState.catalog = cached;
+        renderCatalogCourses();
+        return;
+      }
     }
   } catch (_) {}
 
@@ -481,7 +528,35 @@ function renderCheatSheet() {
   if (!AppState.course?.summary_cheat_sheet) return;
 
   container.innerHTML = AppState.course.summary_cheat_sheet
-    .map((item) => {
+    .map((item, idx) => {
+      const isLocked = Boolean(item.is_locked || item.isLocked) && !AppState.isProUnlocked;
+
+      if (isLocked) {
+        return `
+          <div class="study-card locked-card-teaser">
+            ${buildWatermarkHTML()}
+            <div class="card-header-meta">
+              <span class="topic-title">${item.topic || item.title || `فرمول کلیدی ${idx + 1}`}</span>
+              <span class="page-badge">صفحه ${item.source_page || item.sourcePage || 1} جزوه</span>
+            </div>
+            <div class="locked-blurred-formula-wrapper">
+              <div class="blurred-math-preview">
+                ${renderLatexExpression('\\Delta G = \\Delta H - T\\Delta S < 0 \\implies K_{eq} = \\exp(-\\Delta G^\\circ / RT)', true)}
+                <div style="font-size:0.8rem; color:#94a3b8; line-height:1.6; margin-top:6px;">
+                  در این فرآیند با افزایش دما، انتروپی سیستم به نقطه تعادل فازی می‌رسد و تغییرات انرژی آزاد گیبس صفر می‌شود...
+                </div>
+              </div>
+              <button class="unlock-teaser-badge" onclick="openPaywallModal()">
+                🔓 مشاهده فرمول و نکته امتحانی استاد (نسخه کامل)
+              </button>
+            </div>
+            <div style="font-size:0.75rem; color:#94a3b8; text-align:center; margin-top:8px;">
+              🔒 این فرمول، نکته امتحانی استاد و حل تشریحی در نسخه کامل باز می‌شود.
+            </div>
+          </div>
+        `;
+      }
+
       const pointsHtml = (item.key_points || [])
         .map((p) => `<li>${renderTextWithMath(p)}</li>`)
         .join('');
@@ -493,8 +568,8 @@ function renderCheatSheet() {
         <div class="study-card">
           ${buildWatermarkHTML()}
           <div class="card-header-meta">
-            <span class="topic-title">${item.topic}</span>
-            <span class="page-badge">صفحه ${item.source_page} جزوه</span>
+            <span class="topic-title">${item.topic || item.title}</span>
+            <span class="page-badge">صفحه ${item.source_page || item.sourcePage || 1} جزوه</span>
           </div>
           <ul class="key-points-list">${pointsHtml}</ul>
           ${formulaHtml}
@@ -529,7 +604,7 @@ function renderFlashcardView() {
   }
 
   const card = deck[AppState.currentCardIndex];
-  const isLocked = card.is_locked && !AppState.isProUnlocked;
+  const isLocked = Boolean(card.is_locked || card.isLocked) && !AppState.isProUnlocked;
 
   document.getElementById('cardCounterBadge').textContent = `کارت ${AppState.currentCardIndex + 1} از ${deck.length}`;
 
@@ -538,19 +613,26 @@ function renderFlashcardView() {
 
   if (isLocked) {
     scene.innerHTML = `
-      <div class="flashcard-face">
-        <div class="locked-blur-content card-body-center">
-          <div class="card-text-flow">${renderTextWithMath(card.front)}</div>
+      <div class="flashcard-face locked-card-teaser">
+        ${buildWatermarkHTML()}
+        <div class="card-header-meta">
+          <span style="color:#fbbf24; font-size:0.76rem; font-weight:700;">🔒 کارت پرتکرار امتحانی</span>
+          <span class="page-badge">صفحه ${card.source_page || card.sourcePage || 1} جزوه</span>
         </div>
-        <div class="locked-overlay-cta">
-          <div style="font-size:1.6rem">🔒</div>
-          <div style="font-weight:800; font-size:0.95rem; margin-top:4px;">این فلش‌کارت قفل است</div>
-          <div style="font-size:0.78rem; color:#cbd5e1; margin-top:6px; max-width:320px;">
-            برای دسترسی به تمام فلش‌کارت‌ها، سوالات پایانترم و ۱۰۰ پرسش از هوش مصنوعی، نسخه کامل را فعال کنید.
+        <div class="card-body-center" style="margin-top:8px;">
+          <div class="card-text-flow" style="font-weight:600; font-size:0.95rem;">${renderTextWithMath(card.front)}</div>
+        </div>
+        <div class="locked-blurred-formula-wrapper" style="margin-top:12px; width:100%;">
+          <div class="blurred-math-preview">
+            ${renderLatexExpression('T_m = \\frac{\\Delta H_m}{\\Delta S_m} \\implies \\Delta G_m = 0', true)}
+            <div style="font-size:0.8rem; color:#94a3b8; margin-top:4px;">پاسخ تشریحی کامل + نکات تله تستی طراح سوال...</div>
           </div>
-          <button class="unlock-btn-primary" onclick="openPaywallModal()">
-            🔓 باز کردن قفل کامل (${(AppState.course.price_toman || 59000).toLocaleString('fa-IR')} تومان)
+          <button class="unlock-teaser-badge" onclick="openPaywallModal()">
+            🔓 مشاهده فرمول و نکته امتحانی استاد (نسخه کامل)
           </button>
+        </div>
+        <div style="font-size:0.75rem; color:#94a3b8; text-align:center; margin-top:8px;">
+          🔒 این فرمول، نکته امتحانی استاد و حل تشریحی در نسخه کامل باز می‌شود.
         </div>
       </div>
     `;
@@ -663,19 +745,30 @@ function renderExamQuiz() {
 
   container.innerHTML = AppState.course.exam_questions
     .map((q, idx) => {
-      const isLocked = q.is_locked && !AppState.isProUnlocked;
+      const isLocked = Boolean(q.is_locked || q.isLocked) && !AppState.isProUnlocked;
 
       if (isLocked) {
         return `
-          <div class="study-card locked-container" style="min-height:190px;">
-            <div class="locked-blur-content">
-              <div class="topic-title">${q.question_stem}</div>
+          <div class="study-card locked-card-teaser">
+            ${buildWatermarkHTML()}
+            <div class="card-header-meta">
+              <span class="topic-title">سوال ${idx + 1} (پایانترم)</span>
+              <span class="page-badge">منبع: صفحه ${q.source_page || q.sourcePage || 1} جزوه</span>
             </div>
-            <div class="locked-overlay-cta">
-              <div>🔒 <strong>سوال امتحانی شماره ${idx + 1} قفل است</strong></div>
-              <button class="unlock-btn-primary" onclick="openPaywallModal()">
-                مشاهده تمامی سوالات + پاسخ تشریحی
+            <div style="font-size:0.9rem; margin-bottom:12px; font-weight:600;">
+              ${renderTextWithMath(q.question_stem || q.question || '')}
+            </div>
+            <div class="locked-blurred-formula-wrapper">
+              <div class="blurred-math-preview">
+                ${renderLatexExpression('\\int_{0}^{\\infty} e^{-st} f(t) dt = \\mathcal{L}\\{f(t)\\}', true)}
+                <div style="font-size:0.8rem; color:#94a3b8; margin-top:4px;">گزینه ۱: $x = \\alpha$ | گزینه ۲: $x = \\beta$ | گزینه ۳: $x = \\gamma$</div>
+              </div>
+              <button class="unlock-teaser-badge" onclick="openPaywallModal()">
+                🔓 مشاهده فرمول و نکته امتحانی استاد (نسخه کامل)
               </button>
+            </div>
+            <div style="font-size:0.75rem; color:#94a3b8; text-align:center; margin-top:8px;">
+              🔒 این فرمول، نکته امتحانی استاد و حل تشریحی در نسخه کامل باز می‌شود.
             </div>
           </div>
         `;
@@ -1181,14 +1274,17 @@ function renderCatalogCourses() {
     if (AppState.catalogCategory !== 'all' && c.category !== AppState.catalogCategory) {
       return false;
     }
-    // فیلتر جستجو
+    // فیلتر جستجو (در نام درس، استاد، دانشگاه، رشته یا ترم)
     if (AppState.catalogSearchQuery) {
       const q = AppState.catalogSearchQuery;
       const match =
         (c.title && c.title.toLowerCase().includes(q)) ||
+        (c.professor && c.professor.toLowerCase().includes(q)) ||
+        (c.university && c.university.toLowerCase().includes(q)) ||
         (c.instructor && c.instructor.toLowerCase().includes(q)) ||
         (c.creator && c.creator.toLowerCase().includes(q)) ||
-        (c.category && c.category.toLowerCase().includes(q));
+        (c.category && c.category.toLowerCase().includes(q)) ||
+        (c.semester && c.semester.toLowerCase().includes(q));
       if (!match) return false;
     }
     return true;
@@ -1208,16 +1304,30 @@ function renderCatalogCourses() {
       const isCurrent = (AppState.course && AppState.course.id === c.id) || AppState.currentCourseSlug === c.slug;
       const isUnlocked = c.isProUnlocked || (isCurrent && AppState.isProUnlocked);
       const priceText = isUnlocked ? '✨ نسخه کامل فعال' : `${(c.price_toman || 59000).toLocaleString('fa-IR')} تومان`;
+      const recBadge = c.isRecommendedForDepartment ? `<span style="background:rgba(52,211,153,0.2); color:#34d399; font-size:0.68rem; padding:2px 6px; border-radius:6px; font-weight:700; margin-right:6px;">⭐ پیشنهاد دانشکده شما</span>` : '';
+      const profLine = c.professor || c.instructor || '';
+      const uniLine = c.university ? `🏛️ ${c.university}` : '';
+      const semLine = c.semester ? `📅 ${c.semester}` : '';
+      const examWeightBadge = c.examWeight ? `<div class="catalog-card-exam-weight">🎯 ${c.examWeight}</div>` : '';
 
       return `
         <div class="course-catalog-card ${isCurrent ? 'active-course' : ''}" onclick="switchCourse('${c.slug}')">
-          <div class="catalog-card-category">${c.category || 'دروس پایه'}</div>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div class="catalog-card-category">${c.category || 'دروس پایه'}</div>
+            ${recBadge}
+          </div>
           <div class="catalog-card-title">${c.title}</div>
-          <div class="catalog-card-instructor">${c.instructor || ''} • ${c.creator || ''}</div>
+          <div class="catalog-card-prof">
+            ${profLine ? `👨‍🏫 ${profLine}` : ''}
+            ${uniLine ? ` • ${uniLine}` : ''}
+            ${semLine ? ` • ${semLine}` : ''}
+          </div>
+          ${examWeightBadge}
           <div class="catalog-card-footer">
             <div class="catalog-card-badges">
-              <span>🗂️ ${c.flashcards_count || 4} فلش‌کارت</span>
-              <span>📝 ${c.questions_count || 4} سوال امتحان</span>
+              <span>📐 ${c.formulasCount || c.cheat_sheet_count || 4} فرمول</span>
+              <span>🗂️ ${c.flashcardsCount || c.flashcards_count || 4} کارت</span>
+              <span>📝 ${c.quizCount || c.questions_count || 4} تست</span>
             </div>
             <div class="catalog-card-price ${isUnlocked ? 'unlocked-pro' : ''}">${priceText}</div>
           </div>

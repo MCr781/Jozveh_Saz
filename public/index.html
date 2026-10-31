@@ -5,10 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>جزوه زنده | دستیار هوشمند شب امتحان</title>
   <link rel="stylesheet" href="./css/katex.min.css" />
-  <link rel="stylesheet" href="./css/app.css?v=11.1" />
+  <link rel="stylesheet" href="./css/app.css?v=11.2" />
 </head>
 <body>
   <div class="app-shell">
+    <!-- Dorm Offline-First Survival Banner -->
+    <div id="dormOfflineBanner" style="display:none;">
+      📡 حالت آفلاین خوابگاه: نمایش از حافظه گوشی (بدون نیاز به اینترنت)
+    </div>
+
     <!-- Sticky Header -->
     <header class="top-header">
       <div class="header-top-bar">
@@ -188,7 +193,7 @@
 
       <!-- Search & Filters -->
       <div class="catalog-search-wrap">
-        <input type="text" class="catalog-search-input" id="catalogSearchInput" placeholder="🔍 جستجو در نام درس، استاد یا جزوه‌نویس..." oninput="filterCatalogList()" />
+        <input type="text" class="catalog-search-input" id="catalogSearchInput" placeholder="🔍 جستجو در نام درس، استاد یا دانشگاه..." oninput="filterCatalogList()" />
       </div>
 
       <div class="filter-pills catalog-pills">
@@ -427,7 +432,7 @@
 
   <script src="./js/katex.min.js"></script>
   <script src="./js/telegram-web-app.js"></script>
-  <script src="./js/telegram.js?v=11.1"></script>
-  <script src="./js/app.js?v=11.1"></script>
+  <script src="./js/telegram.js?v=11.2"></script>
+  <script src="./js/app.js?v=11.2"></script>
 </body>
 </html>

@@ -1051,30 +1051,62 @@ export async function verifyReportWithAIJudge({ originalText, userClaim, sourceP
 }
 
 // سانسور سمت سرور برای کارت‌های قفل‌شده (ضد هک از طریق Network Tab)
-function stripLockedContentForFreeUser(courseObj) {
+export function stripLockedContentForFreeUser(courseObj) {
   const clone = JSON.parse(JSON.stringify(courseObj));
-  clone.flashcards = (clone.flashcards || []).map((fc) => {
-    if (!fc.is_locked) return fc;
+  const FREE_PREVIEW_COUNT = 2;
+  const LOCKED_REDACTION_MSG = '🔒 این فرمول، نکته امتحانی استاد و حل تشریحی در نسخه کامل باز می‌شود.';
+  const LOCKED_FORMULA_LATEX = '\\text{Locked Pro Formula}';
+
+  clone.summary_cheat_sheet = (clone.summary_cheat_sheet || []).map((cs, idx) => {
+    const isLocked = Boolean(cs.is_locked || cs.isLocked || idx >= FREE_PREVIEW_COUNT);
+    if (!isLocked) return cs;
+    return {
+      id: cs.id,
+      topic: cs.topic || cs.title || '',
+      title: cs.title || cs.topic || '',
+      key_points: [LOCKED_REDACTION_MSG],
+      tip: LOCKED_REDACTION_MSG,
+      formula_latex: LOCKED_FORMULA_LATEX,
+      formula: LOCKED_FORMULA_LATEX,
+      latex: LOCKED_FORMULA_LATEX,
+      source_page: cs.source_page ?? cs.sourcePage,
+      sourcePage: cs.sourcePage ?? cs.source_page,
+      is_locked: true,
+      isLocked: true
+    };
+  });
+
+  clone.flashcards = (clone.flashcards || []).map((fc, idx) => {
+    const isLocked = Boolean(fc.is_locked || fc.isLocked || idx >= FREE_PREVIEW_COUNT);
+    if (!isLocked) return fc;
     return {
       id: fc.id,
       is_locked: true,
-      front: fc.front ? (fc.front.slice(0, 65) + '...') : '',
-      back: '🔒 محتوای قفل‌شده (مخصوص نسخه کامل)',
-      source_page: fc.source_page
+      isLocked: true,
+      front: fc.front || '',
+      back: LOCKED_REDACTION_MSG,
+      source_page: fc.source_page ?? fc.sourcePage,
+      sourcePage: fc.sourcePage ?? fc.source_page
     };
   });
-  clone.exam_questions = (clone.exam_questions || []).map((q) => {
-    if (!q.is_locked) return q;
+
+  clone.exam_questions = (clone.exam_questions || []).map((q, idx) => {
+    const isLocked = Boolean(q.is_locked || q.isLocked || idx >= FREE_PREVIEW_COUNT);
+    if (!isLocked) return q;
     return {
       id: q.id,
       is_locked: true,
-      question_stem: q.question_stem ? (q.question_stem.slice(0, 75) + '...') : '',
-      options: ['گزینه ۱ (قفل)', 'گزینه ۲ (قفل)', 'گزینه ۳ (قفل)', 'گزینه ۴ (قفل)'],
+      isLocked: true,
+      question_stem: q.question_stem || q.question || '',
+      options: Array.isArray(q.options) && q.options.length ? q.options.map((_, i) => `گزینه ${i + 1} (قفل)`) : ['گزینه ۱ (قفل)', 'گزینه ۲ (قفل)', 'گزینه ۳ (قفل)', 'گزینه ۴ (قفل)'],
       correct_index: 0,
-      explanation: '🔒 پاسخ تشریحی قفل است.',
-      source_page: q.source_page
+      correctIndex: 0,
+      explanation: LOCKED_REDACTION_MSG,
+      source_page: q.source_page ?? q.sourcePage,
+      sourcePage: q.sourcePage ?? q.source_page
     };
   });
+
   return clone;
 }
 
@@ -1160,6 +1192,10 @@ export const server = http.createServer(async (req, res) => {
           slug,
           title: data.title,
           instructor: data.instructor,
+          professor: data.professor || data.instructor || '',
+          university: data.university || '',
+          semester: data.semester || '',
+          examWeight: data.examWeight || data.exam_weight || '',
           creator: data.creator,
           creator_telegram_id: data.creator_telegram_id || 'creator_default',
           category: data.category || 'دروس عمومی مهندسی',
@@ -1167,6 +1203,9 @@ export const server = http.createServer(async (req, res) => {
           flashcards_count: (data.flashcards || []).length,
           questions_count: (data.exam_questions || []).length,
           cheat_sheet_count: (data.summary_cheat_sheet || []).length,
+          formulasCount: (data.summary_cheat_sheet || []).length,
+          flashcardsCount: (data.flashcards || []).length,
+          quizCount: (data.exam_questions || []).length,
           isProUnlocked: isPurchased,
           isRecommendedForDepartment: isRecommended
         });
