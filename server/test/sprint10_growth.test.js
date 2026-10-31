@@ -1049,3 +1049,105 @@ describe('Wave 11-B: Professor/University Academic Metadata & Blurred Formula Te
     assert.ok(lockedCs.source_page > 0);
   });
 });
+
+describe('Wave 11-C: Dorm Squad 2-Player Group Buy (30% Discount)', () => {
+  const squadInitiatorId = 88776655;
+  const squadInitiatorAuth = mintInitData({ id: squadInitiatorId, first_name: 'Farhad' }, testToken);
+  const squadPartnerId = 44332211;
+  const squadPartnerAuth = mintInitData({ id: squadPartnerId, first_name: 'Nima' }, testToken);
+
+  let createdSquadCode = '';
+
+  it('POST /api/squad/create generates squad deep-link with 30% discount', async () => {
+    const res = await fetch(`${baseUrl}/api/squad/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Init-Data': squadInitiatorAuth
+      },
+      body: JSON.stringify({ courseId: 'sample_course' })
+    });
+
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.ok, true);
+    assert.ok(data.code && data.code.startsWith('squad_'));
+    assert.ok(data.deepLink && data.deepLink.includes(data.code));
+    assert.ok(data.shareLink && data.shareLink.includes('t.me/share/url'));
+    assert.equal(data.originalPriceToman, 59000);
+    assert.equal(data.discountedPriceToman, Math.floor(59000 * 0.7)); // 41300
+    assert.equal(data.discountPercent, 30);
+    assert.equal(data.status, 'waiting_partner');
+
+    createdSquadCode = data.code;
+
+    // Idempotent for same initiator and course
+    const res2 = await fetch(`${baseUrl}/api/squad/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Init-Data': squadInitiatorAuth
+      },
+      body: JSON.stringify({ courseId: 'sample_course' })
+    });
+    const data2 = await res2.json();
+    assert.equal(data2.code, data.code);
+  });
+
+  it('GET /api/squad/status returns squad details and rejects invalid code', async () => {
+    // 1. Valid code
+    const res = await fetch(`${baseUrl}/api/squad/status?code=${createdSquadCode}`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.code, createdSquadCode);
+    assert.equal(data.initiatorId, squadInitiatorId);
+    assert.equal(data.initiatorName, 'Farhad');
+    assert.equal(data.discountedPriceToman, 41300);
+    assert.equal(data.status, 'waiting_partner');
+
+    // 2. Invalid code
+    const invalidRes = await fetch(`${baseUrl}/api/squad/status?code=squad_nonexistent`);
+    assert.equal(invalidRes.status, 404);
+  });
+
+  it('POST /api/payment/create with squadCode applies 30% discount and completes squad on settlement', async () => {
+    const prevAllowDemo = process.env.ALLOW_DEMO_PAYMENTS;
+    process.env.ALLOW_DEMO_PAYMENTS = '1';
+
+    try {
+      // 1. Create payment intent with squadCode
+      const payRes = await fetch(`${baseUrl}/api/payment/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': squadPartnerAuth
+        },
+        body: JSON.stringify({
+          courseId: 'sample_course',
+          squadCode: createdSquadCode
+        })
+      });
+
+      assert.equal(payRes.status, 200);
+      const payData = await payRes.json();
+      assert.equal(payData.ok, true);
+      assert.equal(payData.amountToman, 41300);
+
+      // 2. Verify payment settlement completes squad
+      const verifyRes = await fetch(`${baseUrl}/api/payment/verify?Authority=${payData.authority}&Status=OK`, {
+        redirect: 'manual'
+      });
+      assert.ok(verifyRes.status === 200 || verifyRes.status === 302);
+
+      // 3. Status is now completed
+      const statusRes = await fetch(`${baseUrl}/api/squad/status?code=${createdSquadCode}`);
+      const statusData = await statusRes.json();
+      assert.equal(statusData.status, 'completed');
+      assert.equal(statusData.partnerId, squadPartnerId);
+      assert.ok(statusData.completedAt > 0);
+    } finally {
+      process.env.ALLOW_DEMO_PAYMENTS = prevAllowDemo;
+    }
+  });
+});

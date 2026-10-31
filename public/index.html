@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>جزوه زنده | دستیار هوشمند شب امتحان</title>
   <link rel="stylesheet" href="./css/katex.min.css" />
-  <link rel="stylesheet" href="./css/app.css?v=11.2" />
+  <link rel="stylesheet" href="./css/app.css?v=11.3" />
 </head>
 <body>
   <div class="app-shell">
@@ -78,6 +78,14 @@
 
     <!-- TAB 1: Summary & Formula Cheat Sheet -->
     <section class="view-section active" id="tabCheatSheet">
+      <div class="cheat-sheet-controls-top" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; align-items:center; justify-content:space-between;">
+        <button class="pill-btn exam-door-toggle-btn" id="examDoorToggleBtn" onclick="toggleExamDoorMode()" style="font-weight:700;">
+          ⚡ نمای تقلب‌نامه ۱ صفحه‌ای (۱۰ دقیقه قبل امتحان)
+        </button>
+        <button class="pill-btn star-filter-btn" id="starFilterBtn" onclick="toggleStarredFormulasFilter()" style="display:none; font-size:0.75rem;">
+          📌 فقط فرمول‌های ستاره‌دار / ضعیف من
+        </button>
+      </div>
       <div id="cheatSheetContainer"></div>
     </section>
 
@@ -261,6 +269,49 @@
         </div>
         <strong id="paywallPriceCard">۵۹,۰۰۰ تومان</strong>
       </button>
+
+      <!-- Dorm Squad 2-Player Group Buy Button -->
+      <button class="pay-option-card squad-buy-card" onclick="startDormSquadBuy()" style="border: 1px solid #f59e0b; background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(217, 119, 6, 0.08) 100%);">
+        <div>
+          <div style="font-weight:800; color:#fbbf24; display:flex; align-items:center; gap:6px;">
+            <span>👥 خرید ۲ نفره با همکلاسی</span>
+            <span style="background:#f59e0b; color:#0f172a; font-size:0.68rem; padding:1px 5px; border-radius:4px; font-weight:800;">۳۰٪ تخفیف ویژه خوابگاه</span>
+          </div>
+          <div style="font-size:0.74rem; color:#cbd5e1; margin-top:2px;">یک لینک دعوت برای همکلاسی‌ات بفرست، هر دو با ۳۰٪ تخفیف باز کنید!</div>
+        </div>
+        <strong id="paywallPriceSquad" style="color:#fbbf24;">۴۱,۳۰۰ تومان</strong>
+      </button>
+    </div>
+  </div>
+
+  <!-- Dorm Squad 2-Player Group Buy Modal -->
+  <div class="modal-backdrop" id="squadModalBackdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-header">
+        <strong style="font-size:0.98rem; color:#fbbf24;">👥 خرید ۲ نفره با همکلاسی (۳۰٪ تخفیف خوابگاه)</strong>
+        <button class="close-sheet-btn" onclick="closeSquadModal()">✕</button>
+      </div>
+      <p style="font-size:0.83rem; color:#cbd5e1; margin-bottom:10px;">
+        با ارسال این لینک به هم‌اتاقی یا همکلاسی‌ات، پکیج کامل برای هر دوی شما با ۳۰٪ تخفیف محاسبه می‌شود:
+      </p>
+
+      <div class="squad-invite-box">
+        <div style="font-size:0.78rem; color:#94a3b8; margin-bottom:4px;">کد اختصاصی گروه شما:</div>
+        <div class="squad-code-pill" id="squadCodeDisplay">squad_...</div>
+        <div style="font-size:0.82rem; color:#34d399; font-weight:700; margin-top:6px;" id="squadPriceDisplay">سهم هر نفر: ۴۱,۳۰۰ تومان</div>
+      </div>
+
+      <div class="squad-share-actions">
+        <button class="unlock-btn-primary" onclick="shareSquadTelegram()" style="width:100%; font-size:0.86rem; background:linear-gradient(135deg, #0284c7 0%, #0369a1 100%);">
+          ✈️ ارسال مستقیم لینک دعوت در تلگرام
+        </button>
+        <button class="pill-btn active" onclick="copySquadLink()" style="width:100%; font-size:0.8rem; padding:8px;">
+          📋 کپی لینک دعوت در کلیپ‌بورد
+        </button>
+        <button class="pill-btn" onclick="startOnlinePaymentWithSquad()" style="width:100%; font-size:0.8rem; padding:8px; border-color:#34d399; color:#34d399;">
+          💳 پرداخت سهم من با ۳۰٪ تخفیف
+        </button>
+      </div>
     </div>
   </div>
 
@@ -432,7 +483,7 @@
 
   <script src="./js/katex.min.js"></script>
   <script src="./js/telegram-web-app.js"></script>
-  <script src="./js/telegram.js?v=11.2"></script>
-  <script src="./js/app.js?v=11.2"></script>
+  <script src="./js/telegram.js?v=11.3"></script>
+  <script src="./js/app.js?v=11.3"></script>
 </body>
 </html>

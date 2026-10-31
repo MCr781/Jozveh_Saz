@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4 } from './schema.js';
+import { SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5 } from './schema.js';
 
 export function openDb(file) {
   const db = new DatabaseSync(file);
@@ -67,6 +67,12 @@ export function migrate(db) {
         db.exec('ALTER TABLE users ADD COLUMN bot_blocked_at INTEGER;');
       } catch (_) {}
       db.exec('PRAGMA user_version = 4;');
+    });
+  }
+  if (v < 5) {
+    tx(db, () => {
+      db.exec(SCHEMA_V5);
+      db.exec('PRAGMA user_version = 5;');
     });
   }
 }

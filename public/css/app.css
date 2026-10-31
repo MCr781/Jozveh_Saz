@@ -1079,3 +1079,115 @@ html, body {
   font-weight: 600;
   letter-spacing: -0.2px;
 }
+
+/* Wave 11-C: One-Page Exam-Door Cheat Sheet Mode & Dorm Squad */
+.exam-door-compact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 10px;
+}
+
+.cheat-card-compact {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 8px 12px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: border-color 0.15s ease;
+}
+
+.cheat-card-compact:hover {
+  border-color: #64748b;
+}
+
+.cheat-card-compact.starred {
+  border-color: #f59e0b;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+}
+
+.cheat-compact-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.cheat-compact-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.star-formula-btn {
+  background: transparent;
+  border: none;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: transform 0.1s ease;
+}
+
+.star-formula-btn:active {
+  transform: scale(1.3);
+}
+
+.cheat-compact-formula {
+  text-align: center;
+  margin: 6px 0;
+  padding: 4px 6px;
+  background: rgba(15, 23, 42, 0.6);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.exam-trap-tip {
+  background: rgba(245, 158, 11, 0.12);
+  border-right: 3px solid #f59e0b;
+  color: #fbbf24;
+  font-size: 0.72rem;
+  padding: 3px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.exam-door-toggle-btn.active {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important;
+  color: #0f172a !important;
+  font-weight: 800;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
+}
+
+.squad-invite-box {
+  background: #0f172a;
+  border: 1px dashed #f59e0b;
+  border-radius: 10px;
+  padding: 12px;
+  margin: 12px 0;
+  text-align: center;
+}
+
+.squad-code-pill {
+  font-family: monospace;
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: #fbbf24;
+  letter-spacing: 1px;
+}
+
+.squad-share-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}

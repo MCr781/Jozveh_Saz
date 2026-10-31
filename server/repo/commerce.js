@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { tx, splitPrice, recordSale as recordSaleCore, balanceOf } from '../db.js';
 
 export { splitPrice, balanceOf };
@@ -324,4 +325,65 @@ export function verifyLedgerInvariant(db) {
       approvedPayouts
     }
   };
+}
+
+export function createSquadBuy(db, { courseId, initiatorId, originalPriceToman, discountedPriceToman, now = Date.now() }) {
+  const existing = db.prepare(`
+    SELECT * FROM squad_buys
+    WHERE course_id = ? AND initiator_id = ? AND status = 'waiting_partner' AND created_at > ?
+    ORDER BY created_at DESC LIMIT 1
+  `).get(courseId, initiatorId, now - 48 * 3600 * 1000);
+
+  if (existing) {
+    return existing;
+  }
+
+  const code = `squad_${crypto.randomBytes(5).toString('hex')}`;
+  db.prepare(`
+    INSERT INTO squad_buys(code, course_id, initiator_id, original_price_toman, discounted_price_toman, status, created_at)
+    VALUES(?, ?, ?, ?, ?, 'waiting_partner', ?)
+  `).run(code, courseId, initiatorId, originalPriceToman, discountedPriceToman, now);
+
+  return {
+    code,
+    course_id: courseId,
+    initiator_id: initiatorId,
+    partner_id: null,
+    original_price_toman: originalPriceToman,
+    discounted_price_toman: discountedPriceToman,
+    status: 'waiting_partner',
+    created_at: now,
+    completed_at: null
+  };
+}
+
+export function getSquadBuy(db, code) {
+  if (!code) return null;
+  return db.prepare('SELECT * FROM squad_buys WHERE code = ?').get(code);
+}
+
+export function completeSquadBuy(db, { code, partnerId, now = Date.now() }) {
+  return tx(db, () => {
+    const squad = db.prepare('SELECT * FROM squad_buys WHERE code = ?').get(code);
+    if (!squad) {
+      throw new Error('SQUAD_NOT_FOUND');
+    }
+    if (squad.status === 'completed') {
+      return squad;
+    }
+    if (squad.status !== 'waiting_partner') {
+      throw new Error('SQUAD_NOT_AVAILABLE');
+    }
+    db.prepare(`
+      UPDATE squad_buys
+      SET status = 'completed', partner_id = ?, completed_at = ?
+      WHERE code = ?
+    `).run(partnerId, now, code);
+    return {
+      ...squad,
+      status: 'completed',
+      partner_id: partnerId,
+      completed_at: now
+    };
+  });
 }

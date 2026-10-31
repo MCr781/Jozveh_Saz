@@ -790,13 +790,26 @@ export function findCourseItem(courseId, itemId) {
 }
 
 // ثبت خرید و واریز سهم ۷۰ درصدی جزوه‌نویس
-export async function recordCourseSale(buyerUserId, courseSlugOrId, customPaymentRef = null) {
+export async function recordCourseSale(buyerUserId, courseSlugOrId, customPaymentRef = null, overridePrice = null, squadCode = null) {
   const found = findCourseFile(courseSlugOrId);
   const courseId = found?.data?.id || courseSlugOrId;
   const courseTitle = found?.data?.title || 'پکیج آموزشی شب امتحان';
-  const priceToman = found?.data?.price_toman || 59000;
+  const priceToman = (overridePrice && Number.isSafeInteger(Number(overridePrice)) && Number(overridePrice) > 0)
+    ? Number(overridePrice)
+    : (found?.data?.price_toman || 59000);
   const creatorId = found?.data?.creator_telegram_id || 'creator_demo_1';
   const paymentRef = customPaymentRef || `sale_${buyerUserId}_${courseId}_${Date.now()}_${Math.random()}`;
+
+  // در صورت تکمیل خرید گروهی ۲ نفره خوابگاه، کد گروه را تکمیل و دسترسی را ثبت می‌کنیم
+  if (squadCode) {
+    try {
+      commerceRepo.completeSquadBuy(db, { code: squadCode, partnerId: Number(buyerUserId) });
+      const squad = commerceRepo.getSquadBuy(db, squadCode);
+      if (squad && squad.initiator_id) {
+        DB.purchases[`${squad.initiator_id}_${courseId}`] = true;
+      }
+    } catch (_) {}
+  }
 
   // ۱. ثبت تراکنشی در هسته دیتابیس SQLite
   const buyerNumeric = Number(buyerUserId);
@@ -1873,6 +1886,126 @@ export const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ===== Dorm Squad Group Buy (Wave 11-C: 30% Off for 2 Classmates) =====
+  if (req.method === 'POST' && url.pathname === '/api/squad/create') {
+    (async () => {
+      try {
+        let bodyRaw = '';
+        try {
+          bodyRaw = await readBody(req, 65536);
+        } catch (bodyErr) {
+          if (bodyErr.statusCode === 413) {
+            res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, code: 'PAYLOAD_TOO_LARGE', message: 'حجم درخواست بیش از حد مجاز است.' }));
+            return;
+          }
+          throw bodyErr;
+        }
+
+        const rawAuth = getRawInitData(req);
+        const auth = verifyTelegramInitData(rawAuth, { maxAgeSec: DEFAULT_INITDATA_MAX_AGE_SEC });
+        if (!auth.valid) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'خطای احراز هویت تلگرام.' }));
+          return;
+        }
+
+        const userId = Number(auth.user.id);
+        usersRepo.upsertUser(db, {
+          telegramId: userId,
+          firstName: auth.user.first_name || '',
+          username: auth.user.username || ''
+        });
+        let parsed = {};
+        try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
+        const { courseId } = parsed;
+
+        const found = findCourseFile(courseId);
+        if (!found) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, message: 'جزوه مورد نظر یافت نشد.' }));
+          return;
+        }
+
+        const targetCourseId = found.data?.id || found.slug;
+        const originalPrice = found.data?.price_toman || 59000;
+        const discountedPrice = Math.floor((originalPrice * 70) / 100);
+
+        const squad = commerceRepo.createSquadBuy(db, {
+          courseId: targetCourseId,
+          initiatorId: userId,
+          originalPriceToman: originalPrice,
+          discountedPriceToman: discountedPrice
+        });
+
+        const botUsername = (process.env.BOT_USERNAME || config.botUsername || 'JozvehSazBot').replace(/^@/, '');
+        const deepLink = `https://t.me/${botUsername}?startapp=${squad.code}`;
+        const shareText = `🎓 همکلاسی عزیز! بیا با هم پکیج شب امتحان «${found.data?.title || 'درس'}» رو با ۳۰٪ تخفیف دانشجویی خوابگاه باز کنیم:\n${deepLink}`;
+        const shareLink = `https://t.me/share/url?url=${encodeURIComponent(deepLink)}&text=${encodeURIComponent(shareText)}`;
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          ok: true,
+          code: squad.code,
+          deepLink,
+          shareLink,
+          courseId: targetCourseId,
+          courseTitle: found.data?.title || 'پکیج شب امتحان',
+          originalPriceToman: originalPrice,
+          discountedPriceToman: discountedPrice,
+          discountPercent: 30,
+          status: squad.status
+        }));
+      } catch (err) {
+        console.error('Squad create error:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, message: 'خطای غیرمنتظره در ساخت گروه خوابگاه.' }));
+      }
+    })();
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/squad/status') {
+    const code = url.searchParams.get('code') || '';
+    if (!code) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'کد گروه الزامی است.' }));
+      return;
+    }
+
+    const squad = commerceRepo.getSquadBuy(db, code);
+    if (!squad) {
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, message: 'گروه خرید یافت نشد یا منقضی شده است.' }));
+      return;
+    }
+
+    const found = findCourseFile(squad.course_id);
+    let initiatorName = 'همکلاسی شما';
+    try {
+      const u = db.prepare('SELECT first_name FROM users WHERE telegram_id = ?').get(squad.initiator_id);
+      if (u?.first_name) initiatorName = u.first_name;
+    } catch (_) {}
+
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      ok: true,
+      code: squad.code,
+      courseId: squad.course_id,
+      courseTitle: found?.data?.title || 'پکیج شب امتحان',
+      initiatorId: squad.initiator_id,
+      initiatorName,
+      partnerId: squad.partner_id,
+      originalPriceToman: squad.original_price_toman,
+      discountedPriceToman: squad.discounted_price_toman,
+      discountPercent: 30,
+      status: squad.status,
+      createdAt: squad.created_at,
+      completedAt: squad.completed_at
+    }));
+    return;
+  }
+
   // ===== Payment Gateway (Zarinpal) Create =====
   if (req.method === 'POST' && url.pathname === '/api/payment/create') {
     (async () => {
@@ -1899,7 +2032,7 @@ export const server = http.createServer(async (req, res) => {
         const userId = String(auth.user.id);
         let parsed = {};
         try { parsed = JSON.parse(bodyRaw || '{}'); } catch (_) {}
-        const { courseId } = parsed;
+        const { courseId, squadCode } = parsed;
         const found = findCourseFile(courseId);
         if (!found) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1908,7 +2041,17 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const cid = found.data?.id || found.slug;
-        const price = found.data?.price_toman || 59000;
+        let price = found.data?.price_toman || 59000;
+        let validSquadCode = null;
+
+        if (squadCode) {
+          const squad = commerceRepo.getSquadBuy(db, String(squadCode).trim());
+          if (squad && (squad.status === 'waiting_partner' || squad.status === 'completed')) {
+            price = squad.discounted_price_toman;
+            validSquadCode = squad.code;
+          }
+        }
+
         const courseTitle = found.data?.title || 'پکیج شب امتحان';
 
         const allowDemo = (process.env.ALLOW_DEMO_PAYMENTS === '1' || config.allowDemoPayments) && process.env.NODE_ENV !== 'production';
@@ -1922,10 +2065,17 @@ export const server = http.createServer(async (req, res) => {
             state: 'created'
           });
           DB.pendingPayments = DB.pendingPayments || {};
-          DB.pendingPayments[authority] = { userId, courseId: cid, amount: price, state: 'pending', createdAt: Date.now() };
+          DB.pendingPayments[authority] = {
+            userId,
+            courseId: cid,
+            amount: price,
+            squadCode: validSquadCode,
+            state: 'pending',
+            createdAt: Date.now()
+          };
           saveDB();
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: true, simulated: true, authority, message: 'پرداخت دمو ایجاد شد.' }));
+          res.end(JSON.stringify({ ok: true, simulated: true, authority, amountToman: price, message: 'پرداخت دمو ایجاد شد.' }));
           return;
         }
 
@@ -2069,7 +2219,7 @@ export const server = http.createServer(async (req, res) => {
     if (verified) {
       pending.state = 'done';
       commerceRepo.setPaymentIntentState(db, authority, 'settled');
-      await recordCourseSale(userId, courseId, authority);
+      await recordCourseSale(userId, courseId, authority, pending.amount, pending.squadCode);
       saveDB();
       const redirect = `${process.env.WEBAPP_URL?.trim() || `http://localhost:${PORT}`}/?course=${encodeURIComponent(courseId)}&paid=1`;
       res.writeHead(302, { Location: redirect });

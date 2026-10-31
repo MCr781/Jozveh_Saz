@@ -12,8 +12,17 @@ const AppState = {
   aiRemainingFree: 3,
   activeContextItem: null,
   contextualItem: null,
-  creatorStats: { balanceToman: 0, salesCount: 0 }
+  creatorStats: { balanceToman: 0, salesCount: 0 },
+  isExamDoorMode: false,
+  filterStarredOnly: false,
+  starredFormulas: {},
+  activeSquad: null
 };
+
+try {
+  const savedStarred = localStorage.getItem('jozveh_starred_formulas');
+  if (savedStarred) AppState.starredFormulas = JSON.parse(savedStarred);
+} catch (_) {}
 
 // Helper: Determine API base URL (supports direct server access & Live Server port 5500)
 function getApiBase() {
@@ -497,11 +506,18 @@ function renderHeader() {
 function updatePaywallModalPrices() {
   const c = AppState.course;
   if (!c) return;
-  const priceStr = `${(c.price_toman || 59000).toLocaleString('fa-IR')} تومان`;
+  const originalPrice = c.price_toman || 59000;
+  const priceStr = `${originalPrice.toLocaleString('fa-IR')} تومان`;
+  const squadPrice = Math.floor((originalPrice * 70) / 100);
+  const squadPriceStr = `${squadPrice.toLocaleString('fa-IR')} تومان`;
+
   const p1 = document.getElementById('paywallPriceShaparak');
   const p2 = document.getElementById('paywallPriceCard');
+  const pSquad = document.getElementById('paywallPriceSquad');
+
   if (p1) p1.textContent = priceStr;
   if (p2) p2.textContent = priceStr;
+  if (pSquad) pSquad.textContent = squadPriceStr;
 }
 
 function setupTabSwitching() {
@@ -523,11 +539,136 @@ function setupTabSwitching() {
 }
 
 // 1. Cheat Sheet Tab
+window.toggleExamDoorMode = function () {
+  window.TMA.triggerHaptic('medium');
+  AppState.isExamDoorMode = !AppState.isExamDoorMode;
+  const btn = document.getElementById('examDoorToggleBtn');
+  const starBtn = document.getElementById('starFilterBtn');
+  const container = document.getElementById('cheatSheetContainer');
+
+  if (AppState.isExamDoorMode) {
+    if (btn) {
+      btn.classList.add('active');
+      btn.textContent = '📑 بازگشت به نمای عادی فرمول‌ها';
+    }
+    if (starBtn) starBtn.style.display = 'inline-block';
+    if (container) container.classList.add('exam-door-compact-grid');
+  } else {
+    if (btn) {
+      btn.classList.remove('active');
+      btn.textContent = '⚡ نمای تقلب‌نامه ۱ صفحه‌ای (۱۰ دقیقه قبل امتحان)';
+    }
+    if (starBtn) starBtn.style.display = 'none';
+    if (container) container.classList.remove('exam-door-compact-grid');
+    AppState.filterStarredOnly = false;
+    if (starBtn) starBtn.classList.remove('active');
+  }
+  renderCheatSheet();
+};
+
+window.toggleStarredFormulasFilter = function () {
+  window.TMA.triggerHaptic('light');
+  AppState.filterStarredOnly = !AppState.filterStarredOnly;
+  const starBtn = document.getElementById('starFilterBtn');
+  if (starBtn) {
+    if (AppState.filterStarredOnly) starBtn.classList.add('active');
+    else starBtn.classList.remove('active');
+  }
+  renderCheatSheet();
+};
+
+window.toggleFormulaStar = function (formulaId) {
+  window.TMA.triggerHaptic('success');
+  AppState.starredFormulas[formulaId] = !AppState.starredFormulas[formulaId];
+  try {
+    localStorage.setItem('jozveh_starred_formulas', JSON.stringify(AppState.starredFormulas));
+  } catch (_) {}
+  renderCheatSheet();
+};
+
 function renderCheatSheet() {
   const container = document.getElementById('cheatSheetContainer');
   if (!AppState.course?.summary_cheat_sheet) return;
 
-  container.innerHTML = AppState.course.summary_cheat_sheet
+  let items = AppState.course.summary_cheat_sheet;
+
+  if (AppState.isExamDoorMode) {
+    container.classList.add('exam-door-compact-grid');
+
+    if (AppState.filterStarredOnly) {
+      items = items.filter(
+        (item) => AppState.starredFormulas[item.id] || AppState.leitnerStatus[item.id] === 'review'
+      );
+      if (!items.length) {
+        container.innerHTML = `
+          <div style="grid-column: 1 / -1; text-align:center; padding:30px 10px; color:#fbbf24; font-size:0.84rem; background:#1e293b; border-radius:10px; border:1px dashed #f59e0b;">
+            ⭐ هیچ فرمولی ستاره‌دار نشده است.<br>
+            <span style="color:#94a3b8; font-size:0.75rem; margin-top:6px; display:block;">
+              روی علامت ☆ کنار هر فرمول بزنید تا در لیست ۱۰ دقیقه قبل امتحان قرار گیرد.
+            </span>
+          </div>
+        `;
+        return;
+      }
+    }
+
+    container.innerHTML = items
+      .map((item, idx) => {
+        const isLocked = Boolean(item.is_locked || item.isLocked) && !AppState.isProUnlocked;
+        const isStarred = Boolean(AppState.starredFormulas[item.id]);
+
+        if (isLocked) {
+          return `
+            <div class="cheat-card-compact locked-card-teaser">
+              <div class="cheat-compact-header">
+                <div class="cheat-compact-title">
+                  <span>🔒 ${item.topic || item.title || `فرمول ${idx + 1}`}</span>
+                </div>
+                <span class="page-badge">ص ${item.source_page || item.sourcePage || 1}</span>
+              </div>
+              <div class="locked-blurred-formula-wrapper" style="margin:4px 0; padding:6px;">
+                <div class="blurred-math-preview">
+                  ${renderLatexExpression('\\Delta G = \\Delta H - T\\Delta S', true)}
+                </div>
+                <button class="unlock-teaser-badge" onclick="openPaywallModal()" style="font-size:0.7rem; padding:4px 10px;">
+                  🔓 باز کردن
+                </button>
+              </div>
+              <div class="exam-trap-tip">🔒 مخصوص نسخه کامل</div>
+            </div>
+          `;
+        }
+
+        const formulaHtml = item.formula_latex
+          ? renderLatexExpression(item.formula_latex, true)
+          : '';
+        const tip = item.tip || (item.key_points && item.key_points[0]) || '';
+
+        return `
+          <div class="cheat-card-compact ${isStarred ? 'starred' : ''}">
+            <div class="cheat-compact-header">
+              <div class="cheat-compact-title">
+                <button class="star-formula-btn" onclick="toggleFormulaStar('${item.id}')" title="علامت‌گذاری برای ۱۰ دقیقه قبل امتحان">
+                  ${isStarred ? '⭐' : '☆'}
+                </button>
+                <span>${item.topic || item.title}</span>
+              </div>
+              <span class="page-badge">ص ${item.source_page || item.sourcePage || 1}</span>
+            </div>
+            <div class="cheat-compact-formula">
+              ${formulaHtml}
+            </div>
+            ${tip ? `<div class="exam-trap-tip" title="${escapeHtml(tip)}">⚠️ دام امتحانی: ${renderTextWithMath(tip)}</div>` : ''}
+          </div>
+        `;
+      })
+      .join('');
+    return;
+  }
+
+  container.classList.remove('exam-door-compact-grid');
+  // Normal mode rendering
+  container.innerHTML = items
     .map((item, idx) => {
       const isLocked = Boolean(item.is_locked || item.isLocked) && !AppState.isProUnlocked;
 
@@ -1611,12 +1752,17 @@ window.sendExamImageToSolver = async function (imageBase64) {
   }
 };
 
-// ===== Milestone 4: Real Payment Gateway =====
-window.startOnlinePayment = async function () {
+// ===== Milestone 4: Real Payment Gateway & Dorm Squad 2-Player Group Buy =====
+window.startOnlinePayment = async function (extraParams = {}) {
   try {
+    const body = {
+      courseId: AppState.currentCourseSlug,
+      ...(AppState.activeSquad ? { squadCode: AppState.activeSquad.code } : {}),
+      ...extraParams
+    };
     const data = await api('/api/payment/create', {
       method: 'POST',
-      body: JSON.stringify({ courseId: AppState.currentCourseSlug })
+      body: JSON.stringify(body)
     });
     if (data && data.paymentUrl) {
       window.location.href = data.paymentUrl;
@@ -1629,6 +1775,67 @@ window.startOnlinePayment = async function () {
     alert(data?.message || 'خطا در ایجاد پرداخت.');
   } catch (err) {
     alert(err?.message || 'خطا در اتصال به درگاه پرداخت.');
+  }
+};
+
+window.startOnlinePaymentWithSquad = async function () {
+  closeSquadModal();
+  await window.startOnlinePayment({ squadCode: AppState.activeSquad?.code });
+};
+
+window.startDormSquadBuy = async function () {
+  window.TMA.triggerHaptic('light');
+  try {
+    const courseId = AppState.currentCourseSlug || AppState.course?.id || 'sample_course';
+    const data = await api('/api/squad/create', {
+      method: 'POST',
+      body: JSON.stringify({ courseId })
+    });
+    if (data && data.ok) {
+      AppState.activeSquad = data;
+      const codeEl = document.getElementById('squadCodeDisplay');
+      const priceEl = document.getElementById('squadPriceDisplay');
+      if (codeEl) codeEl.textContent = data.code;
+      if (priceEl) priceEl.textContent = `سهم هر نفر: ${Number(data.discountedPriceToman).toLocaleString('fa-IR')} تومان`;
+      closePaywallModal();
+      document.getElementById('squadModalBackdrop').classList.add('open');
+    } else {
+      alert(data?.message || 'خطا در ایجاد گروه خرید خوابگاه.');
+    }
+  } catch (err) {
+    alert(err?.message || 'خطا در برقراری ارتباط با سرور.');
+  }
+};
+
+window.closeSquadModal = function () {
+  document.getElementById('squadModalBackdrop').classList.remove('open');
+};
+
+window.copySquadLink = function () {
+  window.TMA.triggerHaptic('success');
+  const link = AppState.activeSquad?.deepLink || '';
+  if (window.navigator?.clipboard?.writeText) {
+    window.navigator.clipboard.writeText(link).then(() => {
+      alert('✅ لینک دعوت گروهی کپی شد!\nبرای همکلاسی‌ات در تلگرام ارسال کن تا هر دو ۳۰٪ تخفیف بگیرید.');
+    }).catch(() => {
+      alert(`لینک دعوت:\n${link}`);
+    });
+  } else {
+    alert(`لینک دعوت:\n${link}`);
+  }
+};
+
+window.shareSquadTelegram = function () {
+  window.TMA.triggerHaptic('success');
+  const shareLink = AppState.activeSquad?.shareLink;
+  if (shareLink) {
+    if (window.Telegram?.WebApp?.openTelegramLink) {
+      window.Telegram.WebApp.openTelegramLink(shareLink);
+    } else {
+      window.open(shareLink, '_blank');
+    }
+  } else {
+    window.copySquadLink();
   }
 };
 
@@ -2261,6 +2468,19 @@ window.checkDeepLinkNavigation = async function () {
         renderFlashcardView();
       }
     }
+  }
+
+  if (startParam && startParam.startsWith('squad_')) {
+    try {
+      const sData = await api(`/api/squad/status?code=${encodeURIComponent(startParam)}`);
+      if (sData && sData.ok) {
+        AppState.activeSquad = sData;
+        if (sData.courseId && AppState.currentCourseSlug !== sData.courseId) {
+          await switchCourse(sData.courseId);
+        }
+        window.openPaywallModal();
+      }
+    } catch (_) {}
   }
 };
 

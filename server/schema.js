@@ -356,3 +356,17 @@ export const SCHEMA_V4 = `
     sent_at INTEGER
   ) STRICT;
 `;
+
+export const SCHEMA_V5 = `
+  CREATE TABLE IF NOT EXISTS squad_buys(
+    code TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    initiator_id INTEGER NOT NULL,
+    partner_id INTEGER,
+    original_price_toman INTEGER NOT NULL,
+    discounted_price_toman INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('waiting_partner','completed','expired')),
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER
+  ) STRICT;
+`;
