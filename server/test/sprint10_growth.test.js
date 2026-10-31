@@ -32,7 +32,9 @@ const {
   synthesizeGroundedTutorAnswer,
   chunkTextForSse,
   resetFallbackStateForTests,
-  isModelExhausted
+  isModelExhausted,
+  markModelExhausted,
+  isAdminUser
 } = await import('../server.js');
 
 const { config } = await import('../config.js');
@@ -449,6 +451,178 @@ describe('Story S10-0: Production Gemini 3.8 Flash Upgrade & Fallback', () => {
     } finally {
       global.fetch = originalFetch;
       resetFallbackStateForTests();
+    }
+  });
+
+  it('exhausting a model on Key 1 does NOT mark that model exhausted for Key 2 (AQ. key format supported)', async () => {
+    resetFallbackStateForTests();
+    const key1 = 'AQ.Key1_Alpha1111';
+    const key2 = 'AQ.Key2_Beta2222';
+
+    // Mark model exhausted on key 1
+    markModelExhausted('gemini-3.8-flash', 60000, key1);
+
+    // Key 1 is exhausted
+    assert.strictEqual(isModelExhausted('gemini-3.8-flash', key1), true);
+
+    // Key 2 is NOT exhausted
+    assert.strictEqual(isModelExhausted('gemini-3.8-flash', key2), false);
+
+    // Backward-compatible 1-arg check detects that model is exhausted under at least one key
+    assert.strictEqual(isModelExhausted('gemini-3.8-flash'), true);
+
+    // Test with callGeminiGenerateContent
+    const originalFetch = global.fetch;
+    const requestedModels = [];
+
+    global.fetch = async (url, opts) => {
+      const match = String(url).match(/models\/([^:]+):generateContent/);
+      const targetModel = match ? match[1] : '';
+      const keyHeader = opts?.headers?.['x-goog-api-key'];
+      requestedModels.push({ targetModel, keyHeader });
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: `پاسخ از ${targetModel}` }] } }]
+        })
+      };
+    };
+
+    try {
+      // Calling with key1 should skip gemini-3.8-flash and request gemini-3.5-flash-lite
+      requestedModels.length = 0;
+      await callGeminiGenerateContent({
+        apiKey: key1,
+        model: 'gemini-3.8-flash',
+        payload: { contents: [{ parts: [{ text: 'تست کلید ۱' }] }] },
+        timeoutMs: 2000
+      });
+      assert.strictEqual(requestedModels[0].targetModel, 'gemini-3.5-flash-lite');
+
+      // Calling with key2 should use gemini-3.8-flash directly!
+      requestedModels.length = 0;
+      await callGeminiGenerateContent({
+        apiKey: key2,
+        model: 'gemini-3.8-flash',
+        payload: { contents: [{ parts: [{ text: 'تست کلید ۲' }] }] },
+        timeoutMs: 2000
+      });
+      assert.strictEqual(requestedModels[0].targetModel, 'gemini-3.8-flash');
+      assert.strictEqual(requestedModels[0].keyHeader, key2);
+    } finally {
+      global.fetch = originalFetch;
+      resetFallbackStateForTests();
+    }
+  });
+
+  it('isAdminUser grants unlimited AI quota and unlocked course access to ADMIN_CHAT_ID while restricting normal users', async () => {
+    const adminId = 999999;
+    const regularId = 777123;
+    const adminAuth = mintInitData({ id: adminId, first_name: 'SuperAdmin' }, testToken);
+    const regularAuth = mintInitData({ id: regularId, first_name: 'RegularStudent' }, testToken);
+
+    // 1. Check helper
+    assert.strictEqual(isAdminUser(adminId), true);
+    assert.strictEqual(isAdminUser(String(adminId)), true);
+    assert.strictEqual(isAdminUser(regularId), false);
+    assert.strictEqual(isAdminUser(undefined), false);
+
+    // Test ADMIN_TELEGRAM_IDS support
+    const prevIds = process.env.ADMIN_TELEGRAM_IDS;
+    process.env.ADMIN_TELEGRAM_IDS = '12345,67890';
+    assert.strictEqual(isAdminUser('12345'), true);
+    assert.strictEqual(isAdminUser('67890'), true);
+    assert.strictEqual(isAdminUser('99999'), false);
+    if (prevIds !== undefined) process.env.ADMIN_TELEGRAM_IDS = prevIds;
+    else delete process.env.ADMIN_TELEGRAM_IDS;
+
+    // 2. GET /api/course for admin vs regular
+    const resAdminCourse = await fetch(`${baseUrl}/api/course?id=sample_course`, {
+      headers: { 'X-Telegram-Init-Data': adminAuth }
+    });
+    assert.strictEqual(resAdminCourse.status, 200);
+    const adminCourseData = await resAdminCourse.json();
+    assert.strictEqual(adminCourseData.isProUnlocked, true);
+    assert.strictEqual(adminCourseData.remainingAiQuota, 9999);
+    // Locked flashcard answers must NOT be stripped for admin
+    const lockedFc = (adminCourseData.course.flashcards || []).find((f) => f.is_locked);
+    if (lockedFc) {
+      assert.notStrictEqual(lockedFc.back, '🔒 محتوای قفل‌شده (مخصوص نسخه کامل)');
+    }
+
+    const resRegularCourse = await fetch(`${baseUrl}/api/course?id=sample_course`, {
+      headers: { 'X-Telegram-Init-Data': regularAuth }
+    });
+    assert.strictEqual(resRegularCourse.status, 200);
+    const regularCourseData = await resRegularCourse.json();
+    assert.strictEqual(regularCourseData.isProUnlocked, false);
+    assert.ok(regularCourseData.remainingAiQuota <= 3);
+    const regLockedFc = (regularCourseData.course.flashcards || []).find((f) => f.is_locked);
+    if (regLockedFc) {
+      assert.strictEqual(regLockedFc.back, '🔒 محتوای قفل‌شده (مخصوص نسخه کامل)');
+    }
+
+    // 3. POST /api/ask-tutor: admin bypasses quota limit
+    const { aiRepo } = await import('../server.js');
+    // Set regular user usage to 10 queries (over limit of 3)
+    aiRepo.recordAiQuery(db, { userId: String(regularId), courseId: 'sample_course', now: Date.now() });
+    aiRepo.recordAiQuery(db, { userId: String(regularId), courseId: 'sample_course', now: Date.now() });
+    aiRepo.recordAiQuery(db, { userId: String(regularId), courseId: 'sample_course', now: Date.now() });
+    aiRepo.recordAiQuery(db, { userId: String(regularId), courseId: 'sample_course', now: Date.now() });
+
+    const resRegularChat = await fetch(`${baseUrl}/api/ask-tutor`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Init-Data': regularAuth
+      },
+      body: JSON.stringify({
+        courseId: 'sample_course',
+        question: 'سوال تستی'
+      })
+    });
+    assert.strictEqual(resRegularChat.status, 402, 'Regular user must be blocked when quota is exceeded');
+
+    // Admin with same query count is NEVER blocked with 402
+    aiRepo.recordAiQuery(db, { userId: String(adminId), courseId: 'sample_course', now: Date.now() });
+    aiRepo.recordAiQuery(db, { userId: String(adminId), courseId: 'sample_course', now: Date.now() });
+    aiRepo.recordAiQuery(db, { userId: String(adminId), courseId: 'sample_course', now: Date.now() });
+    aiRepo.recordAiQuery(db, { userId: String(adminId), courseId: 'sample_course', now: Date.now() });
+
+    const originalFetch = global.fetch;
+    global.fetch = async (url, opts) => {
+      if (String(url).includes('generateContent')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: 'پاسخ هوش مصنوعی به ادمین' }] } }]
+          })
+        };
+      }
+      return originalFetch(url, opts);
+    };
+
+    try {
+      const resAdminChat = await fetch(`${baseUrl}/api/ask-tutor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': adminAuth
+        },
+        body: JSON.stringify({
+          courseId: 'sample_course',
+          question: 'سوال ادمین'
+        })
+      });
+      assert.strictEqual(resAdminChat.status, 200, 'Admin must never be blocked with 402');
+      const adminChatData = await resAdminChat.json();
+      assert.strictEqual(adminChatData.ok, true);
+      assert.strictEqual(adminChatData.remainingAiQuota, 9999);
+    } finally {
+      global.fetch = originalFetch;
     }
   });
 });

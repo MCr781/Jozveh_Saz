@@ -961,7 +961,7 @@ window.sendContextualPrompt = async function (presetKey, customText) {
     return;
   }
 
-  const chatBox = document.getElementById('drawerChatBox');
+  const chatBox = document.getElementById('contextualChatHistory') || document.getElementById('drawerChatBox');
   const inputEl = document.getElementById('drawerInput');
   const userMsg = (customText || inputEl.value || '').trim();
   if (!userMsg) return;
@@ -1005,7 +1005,8 @@ window.sendContextualPrompt = async function (presetKey, customText) {
       const el = document.getElementById(loadingId);
       if (el) {
         el.innerHTML = renderTextWithMath(accumulatedText);
-        chatBox.scrollTop = chatBox.scrollHeight;
+        const container = document.getElementById('contextualChatHistory') || chatBox;
+        if (container) container.scrollTop = container.scrollHeight;
       }
     });
 
@@ -1039,7 +1040,8 @@ window.sendContextualPrompt = async function (presetKey, customText) {
       window.TMA.triggerHaptic('success');
       if (loadingEl) {
         loadingEl.innerHTML = renderTextWithMath(data.reply);
-        chatBox.scrollTop = chatBox.scrollHeight;
+        const container = document.getElementById('contextualChatHistory') || chatBox;
+        if (container) container.scrollTop = container.scrollHeight;
       }
       if (data.remainingAiQuota !== undefined) {
         AppState.aiRemainingFree = data.remainingAiQuota;
@@ -1064,7 +1066,7 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
     return;
   }
 
-  const box = document.getElementById('mainAiChatBox');
+  const box = document.getElementById('mainChatHistory') || document.getElementById('mainAiChatBox');
   const input = document.getElementById('mainAiInput');
   const question = (labelText || input.value || '').trim();
   if (!question) return;
@@ -1091,7 +1093,8 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
       const el = document.getElementById(loadingId);
       if (el) {
         el.innerHTML = renderTextWithMath(accumulatedText);
-        box.scrollTop = box.scrollHeight;
+        const container = document.getElementById('mainChatHistory') || box;
+        if (container) container.scrollTop = container.scrollHeight;
       }
     });
 
@@ -1124,7 +1127,8 @@ window.sendMainTabQuestion = async function (presetKey, labelText) {
       window.TMA.triggerHaptic('success');
       if (loadingEl) {
         loadingEl.innerHTML = renderTextWithMath(data.reply);
-        box.scrollTop = box.scrollHeight;
+        const container = document.getElementById('mainChatHistory') || box;
+        if (container) container.scrollTop = container.scrollHeight;
       }
       if (data.remainingAiQuota !== undefined) {
         AppState.aiRemainingFree = data.remainingAiQuota;
@@ -1414,7 +1418,7 @@ async function handleExamImageSelected(e) {
   if (!file) return;
   try {
     const base64 = await compressImageFileToBase64(file);
-    const box = document.getElementById('mainAiChatBox');
+    const box = document.getElementById('solverChatHistory') || document.getElementById('mainChatHistory') || document.getElementById('mainAiChatBox');
     if (box) {
       const bubble = document.createElement('div');
       bubble.className = 'chat-bubble user';
@@ -1430,7 +1434,7 @@ async function handleExamImageSelected(e) {
 
 window.sendExamImageToSolver = async function (imageBase64) {
   if (!AppState.isProUnlocked && AppState.aiRemainingFree <= 0) { openPaywallModal(); return; }
-  const box = document.getElementById('mainAiChatBox');
+  const box = document.getElementById('solverChatHistory') || document.getElementById('mainChatHistory') || document.getElementById('mainAiChatBox');
   const loadingId = 'loading_img_' + Date.now();
   if (box) {
     box.innerHTML += `<div class="chat-bubble ai" id="${loadingId}">در حال خواندن تصویر و حل سوال... ⏳</div>`;
@@ -1447,7 +1451,8 @@ window.sendExamImageToSolver = async function (imageBase64) {
       const el = document.getElementById(loadingId);
       if (el) {
         el.innerHTML = renderTextWithMath(accumulatedText);
-        if (box) box.scrollTop = box.scrollHeight;
+        const container = document.getElementById('solverChatHistory') || document.getElementById('mainChatHistory') || box;
+        if (container) container.scrollTop = container.scrollHeight;
       }
     });
     const loadingEl = document.getElementById(loadingId);
@@ -1476,7 +1481,8 @@ window.sendExamImageToSolver = async function (imageBase64) {
       window.TMA.triggerHaptic('success');
       if (loadingEl) {
         loadingEl.innerHTML = renderTextWithMath(data.reply);
-        if (box) box.scrollTop = box.scrollHeight;
+        const container = document.getElementById('solverChatHistory') || document.getElementById('mainChatHistory') || box;
+        if (container) container.scrollTop = container.scrollHeight;
       }
       if (data.remainingAiQuota !== undefined) {
         AppState.aiRemainingFree = data.remainingAiQuota;

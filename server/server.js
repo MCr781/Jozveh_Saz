@@ -111,22 +111,66 @@ export async function probeGeminiModel() {
   }
 }
 
-const exhaustedModelsMap = new Map(); // modelName -> timestampMs (until)
-
-export function isModelExhausted(modelName) {
-  if (!modelName) return false;
-  const until = exhaustedModelsMap.get(modelName);
-  if (!until) return false;
-  if (Date.now() >= until) {
-    exhaustedModelsMap.delete(modelName);
-    return false;
-  }
-  return true;
+export function isAdminUser(userId) {
+  if (userId === undefined || userId === null || userId === '') return false;
+  const uid = String(userId).trim();
+  if (!uid) return false;
+  const adminChatId = String(process.env.ADMIN_CHAT_ID || config.adminChatId || '').trim();
+  if (adminChatId && uid === adminChatId) return true;
+  const adminIds = String(process.env.ADMIN_TELEGRAM_IDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return adminIds.includes(uid);
 }
 
-export function markModelExhausted(modelName, ttlMs = 30 * 60 * 1000) {
+const exhaustedModelsMap = new Map(); // `${tag}:${modelName}` -> timestampMs (until)
+
+export function isModelExhausted(modelName, apiKey = '') {
+  if (!modelName) return false;
+  const now = Date.now();
+
+  if (apiKey) {
+    const tag = apiKey.slice(-8);
+    const specificKey = `${tag}:${modelName}`;
+    const specificUntil = exhaustedModelsMap.get(specificKey);
+    if (specificUntil) {
+      if (now < specificUntil) return true;
+      exhaustedModelsMap.delete(specificKey);
+    }
+    const defaultUntil = exhaustedModelsMap.get(`default:${modelName}`);
+    if (defaultUntil) {
+      if (now < defaultUntil) return true;
+      exhaustedModelsMap.delete(`default:${modelName}`);
+    }
+    return false;
+  }
+
+  // Backward compatibility when called with 1 argument (isModelExhausted(model))
+  const defaultUntil = exhaustedModelsMap.get(`default:${modelName}`);
+  if (defaultUntil) {
+    if (now < defaultUntil) return true;
+    exhaustedModelsMap.delete(`default:${modelName}`);
+  }
+  for (const [k, until] of exhaustedModelsMap.entries()) {
+    if (k.endsWith(`:${modelName}`)) {
+      if (now < until) return true;
+      exhaustedModelsMap.delete(k);
+    }
+  }
+  return false;
+}
+
+export function markModelExhausted(modelName, ttlMs = 30 * 60 * 1000, apiKey = '') {
   if (!modelName) return;
-  exhaustedModelsMap.set(modelName, Date.now() + ttlMs);
+  let effectiveTtl = ttlMs;
+  let effectiveKey = apiKey;
+  if (typeof ttlMs === 'string' && !apiKey) {
+    effectiveKey = ttlMs;
+    effectiveTtl = 30 * 60 * 1000;
+  }
+  const tag = effectiveKey ? effectiveKey.slice(-8) : 'default';
+  exhaustedModelsMap.set(`${tag}:${modelName}`, Date.now() + (Number(effectiveTtl) || 30 * 60 * 1000));
 }
 
 export function resetFallbackStateForTests() {
@@ -134,14 +178,23 @@ export function resetFallbackStateForTests() {
 }
 
 export async function callGeminiGenerateContent({
-  apiKey = getNextGeminiKey(),
+  apiKey,
   model = config.geminiModel || 'gemini-3.8-flash',
   payload = {},
   timeoutMs = 75000,
   maxAttempts = 3,
   retryDelayMs
 } = {}) {
-  if (!apiKey) return null;
+  const dynamicKeys = getActiveGeminiKeys();
+  let orderedKeys = dynamicKeys;
+  if (apiKey) {
+    orderedKeys = Array.from(new Set([apiKey, ...dynamicKeys]));
+  } else if (dynamicKeys.length > 1) {
+    const startIdx = keyIdx % dynamicKeys.length;
+    keyIdx++;
+    orderedKeys = dynamicKeys.slice(startIdx).concat(dynamicKeys.slice(0, startIdx));
+  }
+  if (!orderedKeys.length) return null;
 
   const generationConfig = {
     temperature: 0.2,
@@ -195,51 +248,56 @@ export async function callGeminiGenerateContent({
     }
   }
 
-  const baseCascade = [model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'];
-  const uniqueModels = Array.from(new Set(baseCascade.filter(Boolean)));
-  let cascadeModels = uniqueModels.filter(m => !isModelExhausted(m));
-  if (cascadeModels.length === 0) {
-    cascadeModels = uniqueModels;
-  }
-
-  let currentKey = apiKey;
   let lastErr = null;
 
-  for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
-    const activeModel = cascadeModels[mIdx];
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        return await executeRequest(activeModel, currentKey);
-      } catch (err) {
-        lastErr = err;
-        const msg = String(err.message || '').toLowerCase();
-        const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
-        const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+  for (let kIdx = 0; kIdx < orderedKeys.length; kIdx++) {
+    const currentKey = orderedKeys[kIdx];
+    const isPrimaryExhausted = isModelExhausted(model, currentKey);
+    const baseCascade = isPrimaryExhausted
+      ? ['gemini-3.5-flash-lite', model, 'gemini-3.5-flash', 'gemma-3-27b-it']
+      : [model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'];
 
-        if (isQuotaExceeded || isModelRetired) {
-          markModelExhausted(activeModel);
-          if (mIdx < cascadeModels.length - 1) {
-            console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
+    const uniqueModels = Array.from(new Set(baseCascade.filter(Boolean)));
+    let cascadeModels = uniqueModels.filter((m) => !isModelExhausted(m, currentKey));
+    if (cascadeModels.length === 0) {
+      cascadeModels = uniqueModels;
+    }
+
+    for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
+      const activeModel = cascadeModels[mIdx];
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          return await executeRequest(activeModel, currentKey);
+        } catch (err) {
+          lastErr = err;
+          const msg = String(err.message || '').toLowerCase();
+          const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
+          const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+
+          if (isQuotaExceeded || isModelRetired) {
+            markModelExhausted(activeModel, undefined, currentKey);
+            if (mIdx < cascadeModels.length - 1) {
+              console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable on key ...${currentKey.slice(-6)} (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
+              break;
+            }
             break;
           }
-          throw err;
-        }
 
-        const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
-        if (isHighDemand && attempt < maxAttempts - 1) {
-          console.warn(`⚠️ Gemini 503/429 high demand spike on ${activeModel} (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
-          if (effectiveRetryDelay > 0) {
-            await new Promise((r) => setTimeout(r, effectiveRetryDelay));
+          const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
+          if (isHighDemand && attempt < maxAttempts - 1) {
+            console.warn(`⚠️ Gemini 503/429 high demand spike on ${activeModel} (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
+            if (effectiveRetryDelay > 0) {
+              await new Promise((r) => setTimeout(r, effectiveRetryDelay));
+            }
+            continue;
           }
-          currentKey = getNextGeminiKey() || currentKey;
-          continue;
-        }
 
-        if (mIdx < cascadeModels.length - 1) {
-          console.warn(`⚠️ Model ${activeModel} failed after ${attempt + 1} attempts. Cascading to ${cascadeModels[mIdx + 1]}...`);
+          if (mIdx < cascadeModels.length - 1) {
+            console.warn(`⚠️ Model ${activeModel} failed after ${attempt + 1} attempts. Cascading to ${cascadeModels[mIdx + 1]}...`);
+            break;
+          }
           break;
         }
-        throw err;
       }
     }
   }
@@ -248,14 +306,23 @@ export async function callGeminiGenerateContent({
 }
 
 export async function callGeminiStreamGenerateContent({
-  apiKey = getNextGeminiKey(),
+  apiKey,
   model = config.geminiModel || 'gemini-3.8-flash',
   payload = {},
   timeoutMs = 75000,
   maxAttempts = 3,
   retryDelayMs
 } = {}) {
-  if (!apiKey) return null;
+  const dynamicKeys = getActiveGeminiKeys();
+  let orderedKeys = dynamicKeys;
+  if (apiKey) {
+    orderedKeys = Array.from(new Set([apiKey, ...dynamicKeys]));
+  } else if (dynamicKeys.length > 1) {
+    const startIdx = keyIdx % dynamicKeys.length;
+    keyIdx++;
+    orderedKeys = dynamicKeys.slice(startIdx).concat(dynamicKeys.slice(0, startIdx));
+  }
+  if (!orderedKeys.length) return null;
 
   const generationConfig = {
     temperature: 0.2,
@@ -308,51 +375,56 @@ export async function callGeminiStreamGenerateContent({
     }
   }
 
-  const baseCascade = [model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'];
-  const uniqueModels = Array.from(new Set(baseCascade.filter(Boolean)));
-  let cascadeModels = uniqueModels.filter(m => !isModelExhausted(m));
-  if (cascadeModels.length === 0) {
-    cascadeModels = uniqueModels;
-  }
-
-  let currentKey = apiKey;
   let lastErr = null;
 
-  for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
-    const activeModel = cascadeModels[mIdx];
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        return await executeStream(activeModel, currentKey);
-      } catch (err) {
-        lastErr = err;
-        const msg = String(err.message || '').toLowerCase();
-        const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
-        const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+  for (let kIdx = 0; kIdx < orderedKeys.length; kIdx++) {
+    const currentKey = orderedKeys[kIdx];
+    const isPrimaryExhausted = isModelExhausted(model, currentKey);
+    const baseCascade = isPrimaryExhausted
+      ? ['gemini-3.5-flash-lite', model, 'gemini-3.5-flash', 'gemma-3-27b-it']
+      : [model, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemma-3-27b-it'];
 
-        if (isQuotaExceeded || isModelRetired) {
-          markModelExhausted(activeModel);
-          if (mIdx < cascadeModels.length - 1) {
-            console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
+    const uniqueModels = Array.from(new Set(baseCascade.filter(Boolean)));
+    let cascadeModels = uniqueModels.filter((m) => !isModelExhausted(m, currentKey));
+    if (cascadeModels.length === 0) {
+      cascadeModels = uniqueModels;
+    }
+
+    for (let mIdx = 0; mIdx < cascadeModels.length; mIdx++) {
+      const activeModel = cascadeModels[mIdx];
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          return await executeStream(activeModel, currentKey);
+        } catch (err) {
+          lastErr = err;
+          const msg = String(err.message || '').toLowerCase();
+          const isQuotaExceeded = err.status === 429 && (msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('limit:'));
+          const isModelRetired = err.status === 404 || msg.includes('no longer available') || msg.includes('not found');
+
+          if (isQuotaExceeded || isModelRetired) {
+            markModelExhausted(activeModel, undefined, currentKey);
+            if (mIdx < cascadeModels.length - 1) {
+              console.warn(`⚠️ Model ${activeModel} quota exceeded or unavailable on key ...${currentKey.slice(-6)} (${err.message}). Cascading immediately to ${cascadeModels[mIdx + 1]}...`);
+              break;
+            }
             break;
           }
-          throw err;
-        }
 
-        const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
-        if (isHighDemand && attempt < maxAttempts - 1) {
-          console.warn(`⚠️ Gemini stream 503/429 high demand spike on ${activeModel} (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
-          if (effectiveRetryDelay > 0) {
-            await new Promise((r) => setTimeout(r, effectiveRetryDelay));
+          const isHighDemand = err.status === 503 || err.status === 429 || msg.includes('high demand') || msg.includes('overloaded') || msg.includes('unavailable');
+          if (isHighDemand && attempt < maxAttempts - 1) {
+            console.warn(`⚠️ Gemini stream 503/429 high demand spike on ${activeModel} (attempt ${attempt + 1}). Retrying in ${effectiveRetryDelay}ms...`);
+            if (effectiveRetryDelay > 0) {
+              await new Promise((r) => setTimeout(r, effectiveRetryDelay));
+            }
+            continue;
           }
-          currentKey = getNextGeminiKey() || currentKey;
-          continue;
-        }
 
-        if (mIdx < cascadeModels.length - 1) {
-          console.warn(`⚠️ Model ${activeModel} failed stream after ${attempt + 1} attempts. Cascading to ${cascadeModels[mIdx + 1]}...`);
+          if (mIdx < cascadeModels.length - 1) {
+            console.warn(`⚠️ Model ${activeModel} failed stream after ${attempt + 1} attempts. Cascading to ${cascadeModels[mIdx + 1]}...`);
+            break;
+          }
           break;
         }
-        throw err;
       }
     }
   }
@@ -1168,10 +1240,11 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const rawCourse = found.data;
-    const isPurchased = userId ? Boolean(DB.purchases[`${userId}_${rawCourse.id}`]) : false;
+    const isAdmin = userId ? isAdminUser(userId) : false;
+    const isPurchased = isAdmin || (userId ? (commerceRepo.hasPurchased(db, userId, rawCourse.id) || Boolean(DB.purchases[`${userId}_${rawCourse.id}`])) : false);
     const st = userId ? getUserStats(userId) : { bonusQuota: 0, usedAiQueries: 0 };
-    const maxQuota = isPurchased ? (rawCourse.ai_quota_pro || 100) : (userId ? (rawCourse.ai_quota_free || 3) + (st.bonusQuota || 0) : 0);
-    const remainingAiQuota = Math.max(0, maxQuota - (st.usedAiQueries || 0));
+    const maxQuota = isAdmin ? 9999 : (isPurchased ? (rawCourse.ai_quota_pro || 100) : (userId ? (rawCourse.ai_quota_free || 3) + (st.bonusQuota || 0) : 0));
+    const remainingAiQuota = isAdmin ? 9999 : Math.max(0, maxQuota - (st.usedAiQueries || 0));
 
     const safePayload = isPurchased ? rawCourse : stripLockedContentForFreeUser(rawCourse);
 
@@ -1181,6 +1254,7 @@ export const server = http.createServer(async (req, res) => {
       slug: found.slug,
       isProUnlocked: isPurchased,
       remainingAiQuota,
+      aiQuotaRemaining: remainingAiQuota,
       course: safePayload
     }));
     return;
@@ -1360,24 +1434,25 @@ export const server = http.createServer(async (req, res) => {
         const { courseId = 'sample_course', context, contextText, question, presetKey, imageBase64, stream } = bodyObj;
         const isStream = Boolean(stream) || String(req.headers['accept'] || '').includes('text/event-stream');
         const userId = String(auth.user.id);
+        const isAdmin = isAdminUser(userId);
         const st = getUserStats(userId);
 
-        // ضداسپم چت: حداقل ۴ ثانیه فاصله بین هر پیام
+        // ضداسپم چت: حداقل ۴ ثانیه فاصله بین هر پیام (ادمین استثنا است)
         const now = Date.now();
-        if (now - (st.lastChatAt || 0) < 4000) {
+        if (!isAdmin && now - (st.lastChatAt || 0) < 4000) {
           const waitSec = Math.ceil((4000 - (now - st.lastChatAt)) / 1000);
           res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: `لطفاً ${waitSec} ثانیه صبر کنید و سپس سوال بعدی را بپرسید.` }));
           return;
         }
 
-        const isPurchased = commerceRepo.hasPurchased(db, userId, courseId) || Boolean(DB.purchases[`${userId}_${courseId}`]);
+        const isPurchased = isAdmin || commerceRepo.hasPurchased(db, userId, courseId) || Boolean(DB.purchases[`${userId}_${courseId}`]);
         const aiUsage = aiRepo.getAiUsage(db, userId, courseId);
         const currentQueries = aiUsage.queriesCount || (st.usedAiQueries || 0);
         const bonusQuota = aiUsage.bonusQuota || (st.bonusQuota || 0);
-        const maxQuota = isPurchased ? 100 : 3 + bonusQuota;
+        const maxQuota = isAdmin ? 9999 : (isPurchased ? 100 : 3 + bonusQuota);
 
-        if (currentQueries >= maxQuota) {
+        if (!isAdmin && currentQueries >= maxQuota) {
           res.writeHead(402, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, quotaExceeded: true, message: 'سهمیه پرسش رایگان شما تمام شده است. لطفاً نسخه کامل را تهیه کنید.' }));
           return;
@@ -1609,7 +1684,8 @@ export const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({
           ok: true,
           reply: replyText,
-          remainingAiQuota: Math.max(0, maxQuota - (currentQueries + 1))
+          remainingAiQuota: isAdmin ? 9999 : Math.max(0, maxQuota - (currentQueries + 1)),
+          aiQuotaRemaining: isAdmin ? 9999 : Math.max(0, maxQuota - (currentQueries + 1))
         }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2349,7 +2425,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const userId = String(auth.user.id);
-    const isAdmin = userId === String(process.env.ADMIN_CHAT_ID || '');
+    const isAdmin = isAdminUser(userId);
     const jobs = factoryRepo.listFactoryJobs(db, isAdmin ? null : userId);
 
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2377,7 +2453,7 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const userId = String(auth.user.id);
-    const isAdmin = userId === String(process.env.ADMIN_CHAT_ID || '');
+    const isAdmin = isAdminUser(userId);
     if (job.creator_id !== userId && !isAdmin) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, message: 'دسترسی غیرمجاز.' }));
@@ -2411,7 +2487,7 @@ export const server = http.createServer(async (req, res) => {
         }
 
         const userId = String(auth.user.id);
-        const isAdmin = userId === String(process.env.ADMIN_CHAT_ID || '');
+        const isAdmin = isAdminUser(userId);
         if (job.creator_id !== userId && !isAdmin) {
           res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, message: 'دسترسی غیرمجاز.' }));
