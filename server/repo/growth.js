@@ -474,7 +474,7 @@ export async function processScheduledBroadcasts(db, {
   sendFn,
   now = Date.now(),
   maxPerTick = 25,
-  botUsername = 'JozvehSazBot'
+  botUsername = 'JozvehLabBot'
 }) {
   const pendingPosts = db.prepare(`
     SELECT * FROM scheduled_posts
@@ -501,7 +501,7 @@ export async function processScheduledBroadcasts(db, {
     }
     seenChannels.add(post.channel_id);
 
-    const deepLinkUrl = `https://t.me/${botUsername}?startapp=card_${post.course_id}_${post.card_id}`;
+    const deepLinkUrl = `https://t.me/${botUsername}?start=card_${post.course_id}_${post.card_id}`;
 
     try {
       await sendFn({

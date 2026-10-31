@@ -1073,6 +1073,8 @@ describe('Wave 11-C: Dorm Squad 2-Player Group Buy (30% Discount)', () => {
     assert.equal(data.ok, true);
     assert.ok(data.code && data.code.startsWith('squad_'));
     assert.ok(data.deepLink && data.deepLink.includes(data.code));
+    assert.ok(data.deepLink.startsWith(`https://t.me/JozvehLabBot?start=${data.code}`));
+    assert.ok(data.webAppUrl && data.webAppUrl.includes(`/?startapp=${data.code}`));
     assert.ok(data.shareLink && data.shareLink.includes('t.me/share/url'));
     assert.equal(data.originalPriceToman, 59000);
     assert.equal(data.discountedPriceToman, Math.floor(59000 * 0.7)); // 41300
@@ -1244,6 +1246,143 @@ describe('Wave 11-C: Dorm Squad 2-Player Group Buy (30% Discount)', () => {
       assert.ok(!adminQuestions[2].commonTrap.includes('🔒'));
       assert.notStrictEqual(adminQuestions[2].rubricSteps[0].step, 'قفل - بارم‌بندی و کلید تصحیح تشریحی استاد');
       assert.ok(adminQuestions[2].rubricSteps.length >= 3);
+    });
+  });
+
+  describe('Wave 12-A: Universal ?start= Squad & Referral Deep-Links and JozvehLabBot Auto-Sync', () => {
+    it('getRuntimeBotUsername defaults to JozvehLabBot and reflects dynamic setRuntimeBotUsername', async () => {
+      const { getRuntimeBotUsername, setRuntimeBotUsername } = await import('../telegram.js');
+      assert.strictEqual(getRuntimeBotUsername(), 'JozvehLabBot');
+
+      setRuntimeBotUsername('CustomTestBot');
+      assert.strictEqual(getRuntimeBotUsername(), 'CustomTestBot');
+
+      setRuntimeBotUsername('JozvehLabBot');
+      assert.strictEqual(getRuntimeBotUsername(), 'JozvehLabBot');
+    });
+
+    it('POST /api/squad/create uses JozvehLabBot and generates universal ?start=squad_... links with webAppUrl', async () => {
+      const res = await fetch(`${baseUrl}/api/squad/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': squadInitiatorAuth
+        },
+        body: JSON.stringify({ courseId: 'sample_course' })
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = await res.json();
+      assert.strictEqual(data.ok, true);
+      assert.ok(data.deepLink.startsWith(`https://t.me/JozvehLabBot?start=${data.code}`));
+      assert.ok(data.webAppUrl.includes(`/?startapp=${data.code}`));
+      assert.ok(data.shareLink.includes(encodeURIComponent(data.deepLink)));
+    });
+
+    it('GET /api/referral/code uses JozvehLabBot and generates universal ?start=ref_... links with webAppUrl', async () => {
+      const referrerUser = { id: 654321, first_name: 'ReferrerStudent' };
+      const referrerAuth = mintInitData(referrerUser, testToken);
+
+      const res = await fetch(`${baseUrl}/api/referral/code`, {
+        headers: { 'X-Telegram-Init-Data': referrerAuth }
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = await res.json();
+      assert.strictEqual(data.ok, true);
+      assert.ok(data.shareUrl.startsWith(`https://t.me/JozvehLabBot?start=${data.code}`));
+      assert.ok(data.webAppUrl.includes(`/?startapp=${data.code}`));
+    });
+
+    it('sending /start squad_<code> to handleUpdate replies with tailored invitation and inline web_app button containing ?startapp=squad_<code>', async () => {
+      const { handleUpdate } = await import('../bot.js');
+      const originalFetch = global.fetch;
+      const sentTelegrams = [];
+
+      global.fetch = async (url, opts) => {
+        if (String(url).includes('api.telegram.org')) {
+          const body = JSON.parse(opts?.body || '{}');
+          sentTelegrams.push({ url: String(url), body });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, result: { message_id: 12345 } })
+          };
+        }
+        return originalFetch(url, opts);
+      };
+
+      try {
+        const updateId = Date.now() + 500;
+        const testUpdate = {
+          update_id: updateId,
+          message: {
+            message_id: 8881,
+            chat: { id: 554433 },
+            from: { id: 554433, first_name: 'InvitedStudent' },
+            text: `/start ${createdSquadCode}`
+          }
+        };
+
+        const res = await handleUpdate(testUpdate);
+        assert.strictEqual(res.ok, true);
+        assert.strictEqual(sentTelegrams.length, 1);
+
+        const sentMsg = sentTelegrams[0].body;
+        assert.strictEqual(String(sentMsg.chat_id), '554433');
+        assert.ok(sentMsg.text.includes('خرید دونفره') || sentMsg.text.includes('تخفیف'));
+        assert.ok(sentMsg.text.includes('۴۱٬۳۰۰ تومان') || sentMsg.text.includes('41300'));
+
+        const webAppBtn = sentMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+        assert.ok(webAppBtn && webAppBtn.web_app?.url);
+        assert.ok(webAppBtn.web_app.url.includes(`/?startapp=${createdSquadCode}`));
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
+
+    it('pasting a message containing squad_<code> directly into bot replies with web_app button containing ?startapp=squad_<code>', async () => {
+      const { handleUpdate } = await import('../bot.js');
+      const originalFetch = global.fetch;
+      const sentTelegrams = [];
+
+      global.fetch = async (url, opts) => {
+        if (String(url).includes('api.telegram.org')) {
+          const body = JSON.parse(opts?.body || '{}');
+          sentTelegrams.push({ url: String(url), body });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, result: { message_id: 12346 } })
+          };
+        }
+        return originalFetch(url, opts);
+      };
+
+      try {
+        const updateId = Date.now() + 501;
+        // Simulating forwarded/pasted link from Telegram log:
+        const testUpdate = {
+          update_id: updateId,
+          message: {
+            message_id: 8882,
+            chat: { id: 665544 },
+            from: { id: 665544, first_name: 'PastingStudent' },
+            text: `سلام این لینک منه: https://t.me/JozvehLabBot?startapp=${createdSquadCode}`
+          }
+        };
+
+        const res = await handleUpdate(testUpdate);
+        assert.strictEqual(res.ok, true);
+        assert.strictEqual(sentTelegrams.length, 1);
+
+        const sentMsg = sentTelegrams[0].body;
+        const webAppBtn = sentMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+        assert.ok(webAppBtn && webAppBtn.web_app?.url);
+        assert.ok(webAppBtn.web_app.url.includes(`/?startapp=${createdSquadCode}`));
+      } finally {
+        global.fetch = originalFetch;
+      }
     });
   });
 });

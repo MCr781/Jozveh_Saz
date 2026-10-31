@@ -2661,7 +2661,7 @@ window.saveExamDateFromUi = async function () {
 
 window.checkDeepLinkNavigation = async function () {
   const urlParams = new URLSearchParams(window.location.search);
-  let startParam = urlParams.get('tgWebAppStartParam') || urlParams.get('startapp') || urlParams.get('card') || '';
+  let startParam = urlParams.get('tgWebAppStartParam') || urlParams.get('startapp') || urlParams.get('start') || urlParams.get('card') || '';
   if (!startParam && window.Telegram?.WebApp?.initDataUnsafe?.start_param) {
     startParam = window.Telegram.WebApp.initDataUnsafe.start_param;
   }

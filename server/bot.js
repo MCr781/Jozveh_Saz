@@ -4,7 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { db, DB, saveDB, getUserStats, recordCourseSale, findCourseFile } from './server.js';
-import { tgApi, notifyTelegram } from './telegram.js';
+import { tgApi, notifyTelegram, setRuntimeBotUsername, getRuntimeBotUsername } from './telegram.js';
 import * as commerceRepo from './repo/commerce.js';
 import * as reportsRepo from './repo/reports.js';
 import * as aiRepo from './repo/ai.js';
@@ -16,7 +16,7 @@ import { config } from './config.js';
 import { generateCoursePackage, runQualityGate, runFactoryPipeline } from '../factory/generate.js';
 import { triggerTelegramBackupIfConfigured } from '../scripts/backup.js';
 
-export { tgApi, notifyTelegram } from './telegram.js';
+export { tgApi, notifyTelegram, setRuntimeBotUsername, getRuntimeBotUsername } from './telegram.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -551,18 +551,61 @@ async function processUpdate(update) {
     console.log(`📩 Received from ${chatId}: ${msg.text}`);
   }
 
-  // ۲. دستور /start برای دانشجویان
-  if (msg.text && msg.text.startsWith('/start')) {
-    const parts = msg.text.trim().split(/\s+/);
-    if (parts.length > 1) {
-      const param = parts[1];
-      if (param.startsWith('ref_')) {
-        try {
-          growthRepo.bindReferralIfEligible(db, { refereeId: chatId, startParam: param });
-        } catch (_) {}
-      }
-    }
+  // ۲. پردازش هوشمند لینک‌های همکلاسی (squad_...) و معرف (ref_...)
+  // پشتیبانی کامل از دستور مستقیم /start squad_... یا پیست/فوروارد لینک و متن حاوی توکن
+  const textContent = String(msg.text || msg.caption || '');
+  const squadMatch = textContent.match(/\b(squad_[a-f0-9]+)\b/i);
+  const refMatch = textContent.match(/\b(ref_[a-f0-9]+)\b/i);
 
+  if (squadMatch) {
+    const code = squadMatch[1].toLowerCase();
+    const squad = commerceRepo.getSquadBuy(db, code);
+    const foundCourse = squad?.course_id ? findCourseFile(squad.course_id) : null;
+    const courseTitle = foundCourse?.data?.title || 'پکیج شب امتحان';
+    const discountedPrice = squad?.discounted_price_toman
+      ? `${Number(squad.discounted_price_toman).toLocaleString('fa-IR')} تومان`
+      : 'با ۳۰٪ تخفیف دانشجویی';
+
+    await notifyTelegram(
+      chatId,
+      `🎉 <b>دعوت‌نامه خرید دونفره هم‌اتاقی (۳۰٪ تخفیف)</b>\n\n` +
+      `هم‌کلاسی شما یک گروه خرید دونفره برای پکیج <b>«${escapeHtml(courseTitle)}»</b> باز کرده است.\n\n` +
+      `💰 مبلغ نهایی برای شما: <b>${discountedPrice}</b> (به جای قیمت کامل)\n` +
+      `⏱️ وضعیت: آماده فعال‌سازی و پیوستن\n\n` +
+      `👇 برای پیوستن به گروه و فعال‌سازی تخفیف روی دکمه زیر بزنید:`,
+      [
+        [{ text: '🎓 باز کردن پکیج با ۳۰٪ تخفیف همکلاسی', web_app: { url: `${webappUrl}/?startapp=${code}` } }],
+        [{ text: '📚 مشاهده سایر دروس کاتالوگ', web_app: { url: `${webappUrl}/` } }]
+      ]
+    );
+    return;
+  }
+
+  if (refMatch) {
+    const code = refMatch[1].toLowerCase();
+    try {
+      growthRepo.bindReferralIfEligible(db, { refereeId: chatId, startParam: code });
+    } catch (_) {}
+
+    await notifyTelegram(
+      chatId,
+      '👋 <b>به «جزوه زنده» خوش آمدید! (لینک دعوت فعال شد)</b>\n\n' +
+      '📑 فرمول‌نامه استاندارد با رندر ریاضی\n' +
+      '🗂️ فلش‌کارت‌های سه‌بعدی لایتنر شب امتحان\n' +
+      '📝 شبیه‌ساز سوالات امتحانی استاد با پاسخ تشریحی\n' +
+      '⚡ دستیار هوش مصنوعی حل سوال (بدون نیاز به فیلترشکن)\n' +
+      '💰 امکان کسب درآمد ۷۰٪ از فروش جزوه دست‌نویس خودتان\n\n' +
+      '👇 برای شروع مطالعه و باز کردن پکیج روی دکمه زیر بزنید:',
+      [
+        [{ text: '🎓 ورود به جزوه زنده (هدیه معرفی)', web_app: { url: `${webappUrl}/?startapp=${code}` } }],
+        [{ text: '🔄 مرور کارت‌های ضعیف (/review)', callback_data: 'cmd_review' }]
+      ]
+    );
+    return;
+  }
+
+  // ۲.۱ دستور /start عادی برای دانشجویان بدون کد معرف یا گروه خرید
+  if (msg.text && msg.text.startsWith('/start')) {
     await notifyTelegram(
       chatId,
       '👋 <b>به «جزوه زنده» خوش آمدید!</b>\n\n' +
@@ -848,6 +891,14 @@ export async function startTelegramBotPolling() {
   }
   if (isPolling) return;
 
+  const me = await tgApi('getMe', {});
+  if (me && me.ok && me.result?.username) {
+    setRuntimeBotUsername(me.result.username);
+    console.log(`✅ Connected to Telegram Bot: @${me.result.username}`);
+  } else {
+    console.error(`❌ Failed to connect to Telegram Bot: error_code: ${me?.error_code || 'N/A'}, description: ${me?.description || 'Unknown error'}`);
+  }
+
   const mode = config.botMode || (process.env.BOT_MODE || 'poll').trim().toLowerCase();
   if (mode === 'webhook') {
     console.log('🤖 Telegram Bot running in Webhook mode. Long-polling skipped.');
@@ -855,11 +906,7 @@ export async function startTelegramBotPolling() {
     return;
   }
 
-  const me = await tgApi('getMe', {});
-  if (me && me.ok && me.result?.username) {
-    console.log(`✅ Connected to Telegram Bot: @${me.result.username}`);
-  } else {
-    console.error(`❌ Failed to connect to Telegram Bot: error_code: ${me?.error_code || 'N/A'}, description: ${me?.description || 'Unknown error'}`);
+  if (!me || !me.ok || !me.result?.username) {
     return;
   }
 

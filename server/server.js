@@ -17,7 +17,7 @@ import * as inboxRepo from './repo/inbox.js';
 import * as factoryRepo from './repo/factory.js';
 import * as growthRepo from './repo/growth.js';
 import { runQualityGate, runFactoryPipeline, validateCoursePackage, sanitizeCoursePackage } from '../factory/generate.js';
-import { tgApi, notifyTelegram } from './telegram.js';
+import { tgApi, notifyTelegram, getRuntimeBotUsername, setRuntimeBotUsername } from './telegram.js';
 import { requireUser, optionalUser, verifyInitData as authVerifyInitData, extractInitDataRaw, HttpError } from './auth.js';
 import { triggerTelegramBackupIfConfigured } from '../scripts/backup.js';
 
@@ -25,7 +25,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export { loadEnvFile, getEnv } from './env.js';
-export { tgApi, notifyTelegram } from './telegram.js';
+export { tgApi, notifyTelegram, getRuntimeBotUsername, setRuntimeBotUsername } from './telegram.js';
 export { requireUser, optionalUser, HttpError } from './auth.js';
 export { db, commerceRepo, usersRepo, aiRepo, progressRepo, reportsRepo, inboxRepo, factoryRepo, growthRepo };
 export { triggerTelegramBackupIfConfigured };
@@ -1947,9 +1947,11 @@ export const server = http.createServer(async (req, res) => {
           discountedPriceToman: discountedPrice
         });
 
-        const botUsername = (process.env.BOT_USERNAME || config.botUsername || 'JozvehSazBot').replace(/^@/, '');
-        const deepLink = `https://t.me/${botUsername}?startapp=${squad.code}`;
-        const shareText = `🎓 همکلاسی عزیز! بیا با هم پکیج شب امتحان «${found.data?.title || 'درس'}» رو با ۳۰٪ تخفیف دانشجویی خوابگاه باز کنیم:\n${deepLink}`;
+        const botUsername = getRuntimeBotUsername();
+        const webappBase = (config.webappUrl || process.env.WEBAPP_URL || '').trim().replace(/\/+$/, '');
+        const deepLink = `https://t.me/${botUsername}?start=${squad.code}`;
+        const webAppUrl = `${webappBase}/?startapp=${squad.code}`;
+        const shareText = `🎓 هم‌کلاسی عزیز! بیا با هم پکیج شب امتحان «${found.data?.title || 'درس'}» رو با ۳۰٪ تخفیف دانشجویی خوابگاه باز کنیم:\n${deepLink}`;
         const shareLink = `https://t.me/share/url?url=${encodeURIComponent(deepLink)}&text=${encodeURIComponent(shareText)}`;
 
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1958,6 +1960,7 @@ export const server = http.createServer(async (req, res) => {
           code: squad.code,
           deepLink,
           shareLink,
+          webAppUrl,
           courseId: targetCourseId,
           courseTitle: found.data?.title || 'پکیج شب امتحان',
           originalPriceToman: originalPrice,
@@ -2842,11 +2845,13 @@ export const server = http.createServer(async (req, res) => {
     }
 
     const code = growthRepo.getOrCreateReferralCode(db, auth.user.id);
-    const botUser = (process.env.BOT_USERNAME || 'JozvehSazBot').replace(/^@/, '');
-    const shareUrl = `https://t.me/${botUser}?startapp=${encodeURIComponent(code)}`;
+    const botUser = getRuntimeBotUsername();
+    const webappBase = (config.webappUrl || process.env.WEBAPP_URL || '').trim().replace(/\/+$/, '');
+    const shareUrl = `https://t.me/${botUser}?start=${encodeURIComponent(code)}`;
+    const webAppUrl = `${webappBase}/?startapp=${encodeURIComponent(code)}`;
 
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ ok: true, code, shareUrl }));
+    res.end(JSON.stringify({ ok: true, code, shareUrl, deepLink: shareUrl, webAppUrl }));
     return;
   }
 

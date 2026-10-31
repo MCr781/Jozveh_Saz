@@ -98,12 +98,14 @@ export function loadConfig(env = process.env) {
 
   const webhookSecret = (env.WEBHOOK_SECRET || '').trim();
   const botMode = (env.BOT_MODE || 'poll').trim().toLowerCase();
+  const botUsername = (env.BOT_USERNAME || '').trim().replace(/^@/, '') || 'JozvehLabBot';
 
   return Object.freeze({
     isProd,
     nodeEnv: env.NODE_ENV || 'development',
     port,
     botToken,
+    botUsername,
     adminChatId: String((env.ADMIN_CHAT_ID || '').trim()),
     webappUrl: (env.WEBAPP_URL || '').trim().replace(/\/+$/, ''),
     stateDbPath,

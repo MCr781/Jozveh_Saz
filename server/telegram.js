@@ -4,6 +4,22 @@ function getBotToken() {
   return process.env.BOT_TOKEN?.trim() || '';
 }
 
+let runtimeBotUsername = '';
+
+export function setRuntimeBotUsername(username) {
+  if (username) {
+    runtimeBotUsername = String(username).replace(/^@/, '').trim();
+  }
+}
+
+export function getRuntimeBotUsername() {
+  return (
+    runtimeBotUsername ||
+    (process.env.BOT_USERNAME || '').replace(/^@/, '').trim() ||
+    'JozvehLabBot'
+  );
+}
+
 /**
  * Native Telegram Bot API client using global fetch with AbortSignal.timeout.
  */
