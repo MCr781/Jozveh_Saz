@@ -1116,7 +1116,16 @@ export function stripLockedContentForFreeUser(courseObj) {
       correctIndex: 0,
       explanation: LOCKED_REDACTION_MSG,
       source_page: q.source_page ?? q.sourcePage,
-      sourcePage: q.sourcePage ?? q.source_page
+      sourcePage: q.sourcePage ?? q.source_page,
+      barom: q.barom || 4,
+      commonTrap: LOCKED_REDACTION_MSG,
+      rubricSteps: [
+        {
+          step: 'قفل - بارم‌بندی و کلید تصحیح تشریحی استاد',
+          points: q.barom || 4,
+          formula: '\\text{Locked Pro Rubric}'
+        }
+      ]
     };
   });
 

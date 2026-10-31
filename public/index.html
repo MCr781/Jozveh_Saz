@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>جزوه زنده | دستیار هوشمند شب امتحان</title>
   <link rel="stylesheet" href="./css/katex.min.css" />
-  <link rel="stylesheet" href="./css/app.css?v=11.3" />
+  <link rel="stylesheet" href="./css/app.css?v=11.4" />
 </head>
 <body>
   <div class="app-shell">
@@ -131,6 +131,20 @@
         </div>
         <button class="pill-btn active" onclick="openExamPanicModal()" style="font-size:0.72rem; white-space:nowrap;">برنامه فشرده</button>
       </div>
+
+      <!-- Mode Switcher: MCQ vs Professor Rubric Exam Sheet -->
+      <div class="exam-mode-switcher">
+        <button class="exam-mode-btn active" id="btnModeMcq" onclick="setExamQuizMode('mcq')">
+          🎯 تست ۴ گزینه‌ای سریع
+        </button>
+        <button class="exam-mode-btn" id="btnModeRubric" onclick="setExamQuizMode('rubric')">
+          📝 شبیه‌ساز برگه تشریحی (بارم‌بندی استاد)
+        </button>
+      </div>
+
+      <!-- Live 0-20 Score Report Banner (Visible in Rubric Mode) -->
+      <div id="examScoreSummaryBar" style="display:none;"></div>
+
       <div id="examQuestionsContainer"></div>
     </section>
 
@@ -483,7 +497,7 @@
 
   <script src="./js/katex.min.js"></script>
   <script src="./js/telegram-web-app.js"></script>
-  <script src="./js/telegram.js?v=11.3"></script>
-  <script src="./js/app.js?v=11.3"></script>
+  <script src="./js/telegram.js?v=11.4"></script>
+  <script src="./js/app.js?v=11.4"></script>
 </body>
 </html>

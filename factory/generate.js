@@ -169,6 +169,17 @@ export function findBrokenLatexFormulas(courseObj) {
     scanText(q.question_stem, `exam_questions[${i}].question_stem`);
     scanText(q.explanation, `exam_questions[${i}].explanation`);
     (q.options || []).forEach((opt, j) => scanText(opt, `exam_questions[${i}].options[${j}]`));
+    if (q.commonTrap) scanText(q.commonTrap, `exam_questions[${i}].commonTrap`);
+    (q.rubricSteps || []).forEach((rs, j) => {
+      if (rs.step) scanText(rs.step, `exam_questions[${i}].rubricSteps[${j}].step`);
+      if (rs.formula) {
+        if (rs.formula.includes('$')) {
+          scanText(rs.formula, `exam_questions[${i}].rubricSteps[${j}].formula`);
+        } else {
+          testExpression(rs.formula, `exam_questions[${i}].rubricSteps[${j}].formula`);
+        }
+      }
+    });
   });
 
   return errors;
@@ -493,8 +504,16 @@ export function sanitizeCoursePackage(courseObj) {
   (clone.exam_questions || []).forEach((q) => {
     if (q.question_stem) q.question_stem = sanitizeTextPreservingMath(q.question_stem);
     if (q.explanation) q.explanation = sanitizeTextPreservingMath(q.explanation);
+    if (q.commonTrap) q.commonTrap = sanitizeTextPreservingMath(q.commonTrap);
     if (Array.isArray(q.options)) {
       q.options = q.options.map((opt) => sanitizeTextPreservingMath(opt));
+    }
+    if (Array.isArray(q.rubricSteps)) {
+      q.rubricSteps = q.rubricSteps.map((rs) => ({
+        ...rs,
+        step: rs.step ? sanitizeTextPreservingMath(rs.step) : '',
+        formula: rs.formula || ''
+      }));
     }
   });
 

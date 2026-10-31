@@ -1150,4 +1150,100 @@ describe('Wave 11-C: Dorm Squad 2-Player Group Buy (30% Discount)', () => {
       process.env.ALLOW_DEMO_PAYMENTS = prevAllowDemo;
     }
   });
+
+  describe('Story S10-4: Wave 11-D Graded Exam Sheet Simulator & 0–20 Grading Rubric', () => {
+    it('verifies all 4 course files contain step-by-step rubrics summing to 20 total barom with zero KaTeX errors', async () => {
+      const { findBrokenLatexFormulas } = await import('../../factory/generate.js');
+      const courses = ['sample_course.json', 'eng_math_01.json', 'metal_casting_01.json', 'fluid_mechanics_01.json'];
+
+      for (const file of courses) {
+        const filePath = path.join(process.cwd(), 'server', 'content', file);
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+        assert.ok(Array.isArray(data.exam_questions) && data.exam_questions.length > 0, `${file} missing questions`);
+
+        let totalBarom = 0;
+        data.exam_questions.forEach((q, idx) => {
+          assert.ok(typeof q.barom === 'number' && q.barom > 0, `${file} q[${idx}] missing barom`);
+          totalBarom += q.barom;
+
+          assert.ok(Array.isArray(q.rubricSteps) && q.rubricSteps.length >= 3, `${file} q[${idx}] needs at least 3 rubric steps`);
+          let stepSum = 0;
+          q.rubricSteps.forEach((rs, sIdx) => {
+            assert.ok(rs.step && typeof rs.step === 'string', `${file} q[${idx}] step[${sIdx}] missing description`);
+            assert.ok(typeof rs.points === 'number' && rs.points > 0, `${file} q[${idx}] step[${sIdx}] missing points`);
+            stepSum += rs.points;
+          });
+          assert.ok(Math.abs(stepSum - q.barom) < 0.01, `${file} q[${idx}] rubric steps (${stepSum}) do not equal barom (${q.barom})`);
+
+          assert.ok(q.commonTrap && typeof q.commonTrap === 'string' && q.commonTrap.length > 10, `${file} q[${idx}] missing commonTrap`);
+        });
+
+        assert.strictEqual(totalBarom, 20, `${file} total barom must equal exactly 20 points`);
+
+        const latexErrors = findBrokenLatexFormulas(data);
+        assert.strictEqual(latexErrors.length, 0, `${file} has KaTeX errors: ${JSON.stringify(latexErrors)}`);
+      }
+    });
+
+    it('stripLockedContentForFreeUser redacts rubricSteps and commonTrap on locked questions while retaining barom', async () => {
+      const { stripLockedContentForFreeUser } = await import('../server.js');
+      const filePath = path.join(process.cwd(), 'server', 'content', 'sample_course.json');
+      const fullCourse = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+      const stripped = stripLockedContentForFreeUser(fullCourse);
+
+      // Question 1 & 2 (indices 0 and 1) are free preview questions
+      assert.strictEqual(stripped.exam_questions[0].is_locked, false);
+      assert.strictEqual(stripped.exam_questions[0].barom, 4);
+      assert.strictEqual(stripped.exam_questions[0].rubricSteps.length, 3);
+      assert.ok(!stripped.exam_questions[0].commonTrap.includes('🔒'));
+
+      // Question 3, 4, 5 (indices 2, 3, 4) are locked
+      for (let i = 2; i < stripped.exam_questions.length; i++) {
+        const lockedQ = stripped.exam_questions[i];
+        assert.strictEqual(lockedQ.is_locked, true);
+        assert.strictEqual(lockedQ.barom, 4);
+        assert.ok(lockedQ.commonTrap.includes('🔒') || lockedQ.commonTrap.includes('نسخه کامل'), 'commonTrap must be redacted');
+        assert.strictEqual(lockedQ.rubricSteps[0].step, 'قفل - بارم‌بندی و کلید تصحیح تشریحی استاد');
+        assert.strictEqual(lockedQ.rubricSteps[0].formula, '\\text{Locked Pro Rubric}');
+      }
+    });
+
+    it('GET /api/course serves redacted rubrics to free users and full rubrics to admin VIP', async () => {
+      // 1. Free unpurchased user
+      const freeUser = { id: 998877, first_name: 'FreeStudent' };
+      const freeAuth = mintInitData(freeUser, testToken);
+
+      const freeRes = await fetch(`${baseUrl}/api/course?id=sample_course`, {
+        headers: { 'X-Telegram-Init-Data': freeAuth }
+      });
+      assert.strictEqual(freeRes.status, 200);
+      const freeData = await freeRes.json();
+      assert.strictEqual(freeData.isProUnlocked, false);
+
+      const freeQuestions = freeData.course.exam_questions;
+      assert.strictEqual(freeQuestions[0].barom, 4);
+      assert.ok(freeQuestions[2].is_locked, true);
+      assert.ok(freeQuestions[2].commonTrap.includes('🔒') || freeQuestions[2].commonTrap.includes('نسخه کامل'));
+      assert.strictEqual(freeQuestions[2].rubricSteps[0].step, 'قفل - بارم‌بندی و کلید تصحیح تشریحی استاد');
+
+      // 2. Admin VIP user gets full unredacted course
+      const adminUser = { id: 999999, first_name: 'SuperAdmin' };
+      const adminAuth = mintInitData(adminUser, testToken);
+
+      const adminRes = await fetch(`${baseUrl}/api/course?id=sample_course`, {
+        headers: { 'X-Telegram-Init-Data': adminAuth }
+      });
+      assert.strictEqual(adminRes.status, 200);
+      const adminData = await adminRes.json();
+      assert.strictEqual(adminData.isProUnlocked, true);
+
+      const adminQuestions = adminData.course.exam_questions;
+      assert.strictEqual(adminQuestions[2].barom, 4);
+      assert.ok(!adminQuestions[2].commonTrap.includes('🔒'));
+      assert.notStrictEqual(adminQuestions[2].rubricSteps[0].step, 'قفل - بارم‌بندی و کلید تصحیح تشریحی استاد');
+      assert.ok(adminQuestions[2].rubricSteps.length >= 3);
+    });
+  });
 });

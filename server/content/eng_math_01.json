@@ -88,7 +88,26 @@
       ],
       "correct_index": 0,
       "explanation": "چون تابع زوج است:\n$$a_0 = \\frac{2}{\\pi} \\int_0^\\pi x dx = \\frac{2}{\\pi} \\left[ \\frac{x^2}{2} \\right]_0^\\pi = \\frac{2}{\\pi} \\cdot \\frac{\\pi^2}{2} = \\pi$$\nدر نتیجه گزینه ۱ صحیح است.",
-      "source_page": 29
+      "source_page": 29,
+      "barom": 5,
+      "rubricSteps": [
+        {
+          "step": "تشخیص زوج بودن تابع $f(-x) = |{-x}| = |x| = f(x)$ و ساده‌سازی انتگرال",
+          "points": 2.0,
+          "formula": "a_0 = \\frac{1}{2\\pi} \\int_{-\\pi}^\\pi |x| dx = \\frac{1}{\\pi} \\int_0^\\pi x dx"
+        },
+        {
+          "step": "محاسبه انتگرال معین و اعمال حدود صفر تا پی",
+          "points": 2.0,
+          "formula": "\\int_0^\\pi x dx = \\left[ \\frac{x^2}{2} \\right]_0^\\pi = \\frac{\\pi^2}{2}"
+        },
+        {
+          "step": "ضرب در ضریب پیشین و استخراج مقدار دقیق $a_0$",
+          "points": 1.0,
+          "formula": "a_0 = \\frac{1}{\\pi} \\cdot \\frac{\\pi^2}{2} = \\frac{\\pi}{2} \\implies a_0 = \\pi"
+        }
+      ],
+      "commonTrap": "فراموش کردن تقارن زوج و انتگرال‌گیری دوگانه یا تقسیم بر ۲ در تعریف متناقض فرمول $a_0$ کتاب‌ها (کسر ۱ نمره)"
     },
     {
       "id": "em_q_2",
@@ -102,7 +121,26 @@
       ],
       "correct_index": 0,
       "explanation": "اگر دیسکریمینانت $\\Delta = B^2 - 4AC$ بزرگتر از صفر باشد، معادله هذلولوی است (مانند معادله موج $u_{tt} - c^2 u_{xx} = 0$ که $B=0, A=1, C=-c^2$ و $\\Delta = 4c^2 > 0$).",
-      "source_page": 51
+      "source_page": 51,
+      "barom": 5,
+      "rubricSteps": [
+        {
+          "step": "تشکیل معادله مشخصه درجه دوم فرم کانونی",
+          "points": 2.0,
+          "formula": "A \\lambda^2 - B \\lambda + C = 0"
+        },
+        {
+          "step": "محاسبه دیسکریمینانت معادله مشخصه",
+          "points": 1.5,
+          "formula": "\\Delta = B^2 - 4AC"
+        },
+        {
+          "step": "اثبات شرط دو دسته منحنی مشخصه حقیقی متمایز برای هذلولوی بودن",
+          "points": 1.5,
+          "formula": "\\Delta > 0 \\implies \\text{Hyperbolic}"
+        }
+      ],
+      "commonTrap": "جابه‌جا نوشتن علامت دیسکریمینانت با حالت بیضوی ($\\Delta < 0$) یا بیضی بودن ماتریس (کسر ۱.۵ نمره)"
     },
     {
       "id": "em_q_3",
@@ -116,7 +154,26 @@
       ],
       "correct_index": 0,
       "explanation": "🔒 پاسخ تشریحی جامع ویژه خریداران نسخه کامل پکیج.",
-      "source_page": 74
+      "source_page": 74,
+      "barom": 5,
+      "rubricSteps": [
+        {
+          "step": "بررسی سه حالت $\\lambda < 0$ و $\\lambda = 0$ و رد جواب‌های بدیهی",
+          "points": 1.5,
+          "formula": "\\lambda = -\\alpha^2 \\implies y(x) = c_1 \\cosh(\\alpha x) + c_2 \\sinh(\\alpha x) \\implies y \\equiv 0"
+        },
+        {
+          "step": "حل معادله برای $\\lambda = \\beta^2 > 0$ و اعمال شرط مشتق در صفر ($y'(0)=0$)",
+          "points": 2.0,
+          "formula": "y(x) = A \\cos(\\beta x) + B \\sin(\\beta x) \\implies y'(0) = B\\beta = 0 \\implies B = 0"
+        },
+        {
+          "step": "اعمال شرط مرزی دوم $y(L)=0$ و استخراج مقادیر ویژه $\\lambda_n$",
+          "points": 1.5,
+          "formula": "\\cos(\\beta L) = 0 \\implies \\lambda_n = \\left(\\frac{(2n-1)\\pi}{2L}\\right)^2"
+        }
+      ],
+      "commonTrap": "فراموش کردن شرط مرزی مشتق‌دار (نیومن در مبدا) و نوشتن جواب سینوسی به جای کسینوسی (کسر ۲ نمره)"
     },
     {
       "id": "em_q_4",
@@ -130,7 +187,26 @@
       ],
       "correct_index": 2,
       "explanation": "🔒 پاسخ تشریحی و محاسبه مانده در قطب داخل کانتور $z=0$ ویژه خریداران پکیج.",
-      "source_page": 122
+      "source_page": 122,
+      "barom": 5,
+      "rubricSteps": [
+        {
+          "step": "تعیین تکینگی‌ها (قطب‌ها) و موقعیت آن‌ها نسبت به کانتور $|z|=2$",
+          "points": 1.5,
+          "formula": "z_1 = 0 \\in \\text{Int}(C), \\quad z_2 = 3 \\notin \\text{Int}(C)"
+        },
+        {
+          "step": "محاسبه مانده (Residue) در تنها قطب داخل کانتور ($z=0$)",
+          "points": 2.0,
+          "formula": "\\operatorname{Res}(f, 0) = \\lim_{z \\to 0} z \\cdot \\frac{e^z}{z(z-3)} = \\frac{e^0}{-3} = -\\frac{1}{3}"
+        },
+        {
+          "step": "اعمال قضیه مانده کوشی و محاسبه انتگرال دور بسته",
+          "points": 1.5,
+          "formula": "I = 2\\pi i \\operatorname{Res}(f, 0) = -\\frac{2\\pi i}{3}"
+        }
+      ],
+      "commonTrap": "محاسبه مانده در قطب $z=3$ با وجود قرار داشتن آن در خارج از منحنی بسته $|z|=2$ (کسر ۲ نمره)"
     }
   ],
   "sample_ai_responses": {

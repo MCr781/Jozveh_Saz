@@ -16,7 +16,10 @@ const AppState = {
   isExamDoorMode: false,
   filterStarredOnly: false,
   starredFormulas: {},
-  activeSquad: null
+  activeSquad: null,
+  examQuizMode: 'mcq', // 'mcq' | 'rubric'
+  rubricCheckedSteps: {}, // { 'q_1_0': true }
+  rubricKeyRevealed: {} // { 'q_1': true }
 };
 
 try {
@@ -279,6 +282,13 @@ async function loadCourseData(courseSlug) {
   }
 
   if (!AppState.course) return;
+
+  try {
+    const savedSteps = localStorage.getItem(`jozveh_rubric_${courseSlug}`);
+    AppState.rubricCheckedSteps = savedSteps ? JSON.parse(savedSteps) : {};
+  } catch (_) {
+    AppState.rubricCheckedSteps = {};
+  }
 
   AppState.currentCardIndex = 0;
   const loadedCourseId = AppState.course.id;
@@ -879,21 +889,141 @@ window.setCardFilter = function (filterType, btnEl) {
   renderFlashcardView();
 };
 
-// 3. Exam Simulator Tab
+// 3. Exam Simulator Tab (MCQ & Graded Exam Sheet Rubric)
+window.setExamQuizMode = function (mode) {
+  AppState.examQuizMode = mode;
+  const btnMcq = document.getElementById('btnModeMcq');
+  const btnRubric = document.getElementById('btnModeRubric');
+  if (btnMcq) btnMcq.classList.toggle('active', mode === 'mcq');
+  if (btnRubric) btnRubric.classList.toggle('active', mode === 'rubric');
+
+  const scoreBar = document.getElementById('examScoreSummaryBar');
+  if (scoreBar) {
+    scoreBar.style.display = mode === 'rubric' ? 'block' : 'none';
+  }
+
+  window.TMA?.triggerHaptic('light');
+  renderExamQuiz();
+};
+
+function calculateExamTotalScore() {
+  const questions = AppState.course?.exam_questions || [];
+  let earnedPoints = 0;
+  let totalPoints = 0;
+
+  questions.forEach((q) => {
+    const qBarom = Number(q.barom || 4);
+    totalPoints += qBarom;
+    const steps = q.rubricSteps || [];
+    if (steps.length > 0) {
+      steps.forEach((s, sIdx) => {
+        const stepKey = `${q.id}_${sIdx}`;
+        if (AppState.rubricCheckedSteps[stepKey]) {
+          earnedPoints += Number(s.points || 0);
+        }
+      });
+    }
+  });
+
+  if (totalPoints === 0) totalPoints = 20;
+  return {
+    earnedPoints: Math.round(earnedPoints * 10) / 10,
+    totalPoints: Math.round(totalPoints * 10) / 10
+  };
+}
+
+function renderExamScoreBar() {
+  const scoreBar = document.getElementById('examScoreSummaryBar');
+  if (!scoreBar || AppState.examQuizMode !== 'rubric') return;
+
+  const { earnedPoints, totalPoints } = calculateExamTotalScore();
+  const pct = totalPoints > 0 ? Math.min(100, Math.round((earnedPoints / totalPoints) * 100)) : 0;
+
+  let verdictPill = '';
+  if (earnedPoints >= 17) {
+    verdictPill = '<span class="rubric-verdict-pill grade-a">🏆 وضعیت: عالی (نمره الف / A)</span>';
+  } else if (earnedPoints >= 14) {
+    verdictPill = '<span class="rubric-verdict-pill grade-b">✨ وضعیت: خیلی خوب (نمره ب / B)</span>';
+  } else if (earnedPoints >= 10) {
+    verdictPill = '<span class="rubric-verdict-pill grade-c">⚠️ وضعیت: قبولی ناپلئونی (پاس)</span>';
+  } else {
+    verdictPill = '<span class="rubric-verdict-pill grade-f">🚨 وضعیت: خطر افتادن / مشروطی</span>';
+  }
+
+  scoreBar.style.display = 'block';
+  scoreBar.innerHTML = `
+    <div class="rubric-score-card">
+      <div class="rubric-score-header">
+        <span class="rubric-score-title">📝 کارنامه تخمینی برگه تشریحی پایانترم (بارم‌بندی استاد)</span>
+        <span class="rubric-score-badge">${earnedPoints} <span style="font-size:0.85rem; color:#94a3b8;">از ${totalPoints}</span></span>
+      </div>
+      <div class="rubric-score-progress-wrap">
+        <div class="rubric-score-progress-fill" style="width: ${pct}%;"></div>
+      </div>
+      <div class="rubric-score-footer">
+        <span>میزان پوشش بارم: ${pct}٪</span>
+        ${verdictPill}
+      </div>
+    </div>
+  `;
+}
+
+window.toggleRubricKey = function (qId) {
+  AppState.rubricKeyRevealed[qId] = !AppState.rubricKeyRevealed[qId];
+  window.TMA?.triggerHaptic('light');
+  renderExamQuiz();
+};
+
+window.toggleRubricStep = function (qId, stepIdx) {
+  const stepKey = `${qId}_${stepIdx}`;
+  AppState.rubricCheckedSteps[stepKey] = !AppState.rubricCheckedSteps[stepKey];
+
+  try {
+    const slug = AppState.currentCourseSlug || 'sample_course';
+    localStorage.setItem(`jozveh_rubric_${slug}`, JSON.stringify(AppState.rubricCheckedSteps));
+  } catch (_) {}
+
+  window.TMA?.triggerHaptic('selection');
+  renderExamScoreBar();
+  renderExamQuiz();
+};
+
+window.sendExamTopicToLeitner = function (qId) {
+  window.TMA?.triggerHaptic('success');
+  AppState.leitnerStatus[qId] = 'review';
+  try {
+    const loadedCourseId = AppState.course?.id;
+    if (loadedCourseId) {
+      window.TMA?.saveProgress(`progress_${loadedCourseId}`, {
+        leitnerStatus: AppState.leitnerStatus,
+        isProUnlocked: AppState.isProUnlocked
+      });
+    }
+  } catch (_) {}
+  syncStudyProgress();
+  alert('📌 مبحث این سوال با موفقیت به جعبه ۱ لایتنر (مرور ویژه شب امتحان) اضافه شد.');
+  renderExamQuiz();
+};
+
 function renderExamQuiz() {
   const container = document.getElementById('examQuestionsContainer');
   if (!AppState.course?.exam_questions) return;
 
+  const isRubricMode = AppState.examQuizMode === 'rubric';
+  renderExamScoreBar();
+
   container.innerHTML = AppState.course.exam_questions
     .map((q, idx) => {
       const isLocked = Boolean(q.is_locked || q.isLocked) && !AppState.isProUnlocked;
+      const barom = q.barom || 4;
 
       if (isLocked) {
         return `
           <div class="study-card locked-card-teaser">
             ${buildWatermarkHTML()}
             <div class="card-header-meta">
-              <span class="topic-title">سوال ${idx + 1} (پایانترم)</span>
+              <span class="topic-title">سوال ${idx + 1} (${isRubricMode ? 'تشریحی پایانترم' : 'چهارگزینه‌ای'})</span>
+              <span class="barom-badge">بارم: ${barom} نمره</span>
               <span class="page-badge">منبع: صفحه ${q.source_page || q.sourcePage || 1} جزوه</span>
             </div>
             <div style="font-size:0.9rem; margin-bottom:12px; font-weight:600;">
@@ -902,19 +1032,106 @@ function renderExamQuiz() {
             <div class="locked-blurred-formula-wrapper">
               <div class="blurred-math-preview">
                 ${renderLatexExpression('\\int_{0}^{\\infty} e^{-st} f(t) dt = \\mathcal{L}\\{f(t)\\}', true)}
-                <div style="font-size:0.8rem; color:#94a3b8; margin-top:4px;">گزینه ۱: $x = \\alpha$ | گزینه ۲: $x = \\beta$ | گزینه ۳: $x = \\gamma$</div>
+                <div style="font-size:0.8rem; color:#94a3b8; margin-top:4px;">
+                  ${isRubricMode ? 'گام ۱: نوشتن رابطه اصلی (۱.۵ نمره) | گام ۲: جایگذاری و تبدیل واحد (۱.۵ نمره)' : 'گزینه ۱: $x = \\alpha$ | گزینه ۲: $x = \\beta$ | گزینه ۳: $x = \\gamma$'}
+                </div>
               </div>
               <button class="unlock-teaser-badge" onclick="openPaywallModal()">
-                🔓 مشاهده فرمول و نکته امتحانی استاد (نسخه کامل)
+                🔓 مشاهده فرمول، بارم‌بندی و کلید تصحیح استاد (نسخه کامل)
               </button>
             </div>
             <div style="font-size:0.75rem; color:#94a3b8; text-align:center; margin-top:8px;">
-              🔒 این فرمول، نکته امتحانی استاد و حل تشریحی در نسخه کامل باز می‌شود.
+              🔒 این سوال، بارم‌بندی مرحله‌به‌مرحله و کلید تصحیح استاد در نسخه کامل باز می‌شود.
             </div>
           </div>
         `;
       }
 
+      if (isRubricMode) {
+        // Mode 2: Graded Exam Sheet Simulator with Step-by-Step Rubric
+        const isRevealed = Boolean(AppState.rubricKeyRevealed[q.id]);
+        const steps = q.rubricSteps || [];
+        const isAddedToLeitner = AppState.leitnerStatus[q.id] === 'review';
+
+        let stepsHtml = '';
+        if (steps.length > 0) {
+          stepsHtml = steps
+            .map((s, sIdx) => {
+              const stepKey = `${q.id}_${sIdx}`;
+              const isChecked = Boolean(AppState.rubricCheckedSteps[stepKey]);
+              const formulaHtml = s.formula
+                ? `<div class="rubric-step-formula">${renderLatexExpression(s.formula, true)}</div>`
+                : '';
+
+              return `
+                <div class="rubric-step-item ${isChecked ? 'checked' : ''}" onclick="toggleRubricStep('${q.id}', ${sIdx})">
+                  <input type="checkbox" class="rubric-step-checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation(); toggleRubricStep('${q.id}', ${sIdx});" />
+                  <div class="rubric-step-body">
+                    <div class="rubric-step-text">${renderTextWithMath(s.step || '')}</div>
+                    ${formulaHtml}
+                  </div>
+                  <span class="rubric-step-points-badge">+${s.points} نمره</span>
+                </div>
+              `;
+            })
+            .join('');
+        }
+
+        const trapBoxHtml = q.commonTrap
+          ? `
+            <div class="exam-common-trap-box">
+              <div class="exam-common-trap-title">⚠️ دام متداول طراح در برگه امتحان:</div>
+              <div>${renderTextWithMath(q.commonTrap)}</div>
+            </div>
+          `
+          : '';
+
+        const leitnerBtnHtml = isAddedToLeitner
+          ? `<button class="send-to-leitner-btn added" disabled>✅ در جعبه لایتنر قرار دارد (مرور فعال شب امتحان)</button>`
+          : `<button class="send-to-leitner-btn" onclick="sendExamTopicToLeitner('${q.id}')">🔄 افزودن این مبحث به جعبه لایتنر (مرور ویژه شب امتحان)</button>`;
+
+        const rubricContainerHtml = isRevealed
+          ? `
+            <div class="rubric-steps-container">
+              <div style="font-size:0.8rem; font-weight:700; color:#38bdf8; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+                <span>📋 بارم‌بندی و کلید تصحیح گام‌به‌گام استاد:</span>
+                <span style="font-size:0.72rem; color:#94a3b8;">(گام‌های درست را تیک بزنید)</span>
+              </div>
+              <div class="rubric-steps-list">
+                ${stepsHtml}
+              </div>
+              ${trapBoxHtml}
+              ${leitnerBtnHtml}
+              <button class="ask-ai-contextual-btn" style="margin-top:8px;" onclick="openContextualDrawer('${q.id}')">
+                💬 سوال از هوش مصنوعی درباره این مسئله تشریحی
+              </button>
+              <button class="pill-btn" style="margin-top:8px; width:100%; font-size:0.72rem;" onclick="openReportModal('${q.id}')">
+                🚩 گزارش خطای علمی/تایپی در این سوال
+              </button>
+            </div>
+          `
+          : '';
+
+        return `
+          <div class="study-card">
+            ${buildWatermarkHTML()}
+            <div class="card-header-meta">
+              <span class="topic-title">سوال ${idx + 1} (تشریحی)</span>
+              <span class="barom-badge">بارم: ${barom} نمره</span>
+              <span class="page-badge">منبع: صفحه ${q.source_page || q.sourcePage || 1} جزوه</span>
+            </div>
+            <div style="font-size:0.92rem; margin-bottom:12px; line-height:1.5;">
+              ${renderTextWithMath(q.question_stem || q.question || '')}
+            </div>
+            <button class="rubric-key-toggle-btn ${isRevealed ? 'revealed' : ''}" onclick="toggleRubricKey('${q.id}')">
+              ${isRevealed ? '🙈 مخفی‌سازی کلید تصحیح و بارم‌بندی استاد' : '👀 نمایش کلید تصحیح و بارم‌بندی مرحله‌به‌مرحله استاد'}
+            </button>
+            ${rubricContainerHtml}
+          </div>
+        `;
+      }
+
+      // Mode 1: Fast 4-Option MCQ Mode
       const optionsHtml = (q.options || [])
         .map(
           (opt, optIdx) => `
@@ -930,7 +1147,8 @@ function renderExamQuiz() {
           ${buildWatermarkHTML()}
           <div class="card-header-meta">
             <span class="topic-title">سوال ${idx + 1}</span>
-            <span class="page-badge">منبع: صفحه ${q.source_page} جزوه</span>
+            <span class="barom-badge">بارم: ${barom} نمره</span>
+            <span class="page-badge">منبع: صفحه ${q.source_page || q.sourcePage || 1} جزوه</span>
           </div>
           <div style="font-size:0.9rem; margin-bottom:12px;">
             ${renderTextWithMath(q.question_stem)}
